@@ -1,0 +1,9 @@
+# install the package itself in editable mode: pip install -e .
+# then install these extra deps for running notebooks and tests:
+pytest>=8.0
+matplotlib>=3.8
+numpy>=1.26
+pandas>=2.1
+tqdm>=4.66
+jupyter>=1.0
+nbconvert>=7.0

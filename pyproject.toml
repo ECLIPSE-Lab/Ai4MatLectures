@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ai4mat"
+version = "0.1.0"
+description = "PyTorch dataset wrappers for materials science teaching datasets"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.0",
+    "mdsdata>=0.1.5",
+]
+
+[project.urls]
+Homepage = "https://github.com/ECLIPSE-Lab/Ai4MatLectures"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["ai4mat*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["slow: marks tests as slow (deselect with '-m not slow')"]
