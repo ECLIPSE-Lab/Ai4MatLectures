@@ -1,0 +1,1017 @@
+[
+  {
+    "objectID": "notebooks/MG/week11_latent_cahn_hilliard.html",
+    "href": "notebooks/MG/week11_latent_cahn_hilliard.html",
+    "title": "MG Week 11: Latent Space as Materials Genome Coordinate",
+    "section": "",
+    "text": "Open In Colab"
+  },
+  {
+    "objectID": "notebooks/MG/week11_latent_cahn_hilliard.html#learning-objectives",
+    "href": "notebooks/MG/week11_latent_cahn_hilliard.html#learning-objectives",
+    "title": "MG Week 11: Latent Space as Materials Genome Coordinate",
+    "section": "Learning Objectives",
+    "text": "Learning Objectives\n\nUse a continuous physical quantity (energy) to interpret latent space structure\nDiscover whether autoencoders preserve thermodynamic ordering\nApply nearest-neighbor retrieval in latent space"
+  },
+  {
+    "objectID": "notebooks/MG/week11_latent_cahn_hilliard.html#setup",
+    "href": "notebooks/MG/week11_latent_cahn_hilliard.html#setup",
+    "title": "MG Week 11: Latent Space as Materials Genome Coordinate",
+    "section": "Setup",
+    "text": "Setup\n\n!pip install git+https://github.com/ECLIPSE-Lab/Ai4MatLectures.git \"mdsdata&gt;=0.1.5\"\n\n\nimport torch\nimport torch.nn as nn\nfrom torch.utils.data import DataLoader, random_split\nfrom ai4mat.datasets import CahnHilliardDataset\nimport matplotlib.pyplot as plt\nimport numpy as np"
+  },
+  {
+    "objectID": "notebooks/MG/week11_latent_cahn_hilliard.html#load-the-data",
+    "href": "notebooks/MG/week11_latent_cahn_hilliard.html#load-the-data",
+    "title": "MG Week 11: Latent Space as Materials Genome Coordinate",
+    "section": "1. Load the Data",
+    "text": "1. Load the Data\n\n# Use three simulations for training diversity\ndataset = CahnHilliardDataset(simulation_number=[0, 1, 2])\nprint(f\"Dataset size: {len(dataset)}\")\nx0, y0 = dataset[0]\nprint(f\"Sample x shape: {x0.shape}  (1, 64, 64)\")\nprint(f\"Sample y (energy): {y0:.4f}  (free energy of microstructure)\")\n\nenergies_all = torch.tensor([dataset[i][1].item() for i in range(len(dataset))]).numpy()\nprint(f\"\\nEnergy range: [{energies_all.min():.4f}, {energies_all.max():.4f}]\")\nprint(f\"Energy mean:  {energies_all.mean():.4f} ± {energies_all.std():.4f}\")\n\n  0%|          | 0/3 [00:00&lt;?, ?it/s] 33%|███▎      | 1/3 [00:00&lt;00:00,  2.40it/s] 67%|██████▋   | 2/3 [00:01&lt;00:00,  1.82it/s]100%|██████████| 3/3 [00:01&lt;00:00,  1.65it/s]                                             \n\n\nDataset size: 2975\nSample x shape: torch.Size([1, 64, 64])  (1, 64, 64)\nSample y (energy): 586.8312  (free energy of microstructure)\n\nEnergy range: [457.6855, 1099.6606]\nEnergy mean:  629.7600 ± 136.7265\n\n\n\n# Visualize microstructures sorted by energy\nidx_sorted = np.argsort(energies_all)\nfig, axes = plt.subplots(2, 6, figsize=(16, 6))\n# Low-energy samples (more phase-separated)\nfor i, ax in enumerate(axes[0]):\n    idx = idx_sorted[i * (len(idx_sorted) // 6)]\n    ax.imshow(dataset[idx][0].squeeze().numpy(), cmap='RdBu_r', vmin=0, vmax=1)\n    ax.set_title(f\"E={dataset[idx][1]:.3f}\", fontsize=8)\n    ax.axis('off')\naxes[0, 0].set_ylabel(\"Low energy\\n(phase-separated)\", fontsize=8)\n\n# High-energy samples (more mixed)\nfor i, ax in enumerate(axes[1]):\n    idx = idx_sorted[-(i * (len(idx_sorted) // 6)) - 1]\n    ax.imshow(dataset[idx][0].squeeze().numpy(), cmap='RdBu_r', vmin=0, vmax=1)\n    ax.set_title(f\"E={dataset[idx][1]:.3f}\", fontsize=8)\n    ax.axis('off')\naxes[1, 0].set_ylabel(\"High energy\\n(mixed/disordered)\", fontsize=8)\n\nplt.suptitle(\"Cahn-Hilliard microstructures ordered by free energy\")\nplt.tight_layout()\nplt.show()"
+  },
+  {
+    "objectID": "notebooks/MG/week11_latent_cahn_hilliard.html#trainval-split",
+    "href": "notebooks/MG/week11_latent_cahn_hilliard.html#trainval-split",
+    "title": "MG Week 11: Latent Space as Materials Genome Coordinate",
+    "section": "2. Train/Val Split",
+    "text": "2. Train/Val Split\n\nn_train = int(0.8 * len(dataset))\nn_val = len(dataset) - n_train\ntrain_ds, val_ds = random_split(dataset, [n_train, n_val])\n\ntrain_loader = DataLoader(train_ds, batch_size=32, shuffle=True)\nval_loader   = DataLoader(val_ds,   batch_size=32, shuffle=False)\nprint(f\"Train: {n_train} | Val: {n_val}\")\n\nTrain: 2380 | Val: 595"
+  },
+  {
+    "objectID": "notebooks/MG/week11_latent_cahn_hilliard.html#define-the-autoencoder",
+    "href": "notebooks/MG/week11_latent_cahn_hilliard.html#define-the-autoencoder",
+    "title": "MG Week 11: Latent Space as Materials Genome Coordinate",
+    "section": "3. Define the Autoencoder",
+    "text": "3. Define the Autoencoder\n\nclass ConvAutoencoder(nn.Module):\n    def __init__(self, latent_dim=2):\n        super().__init__()\n        self.encoder = nn.Sequential(\n            nn.Conv2d(1, 16, 3, stride=2, padding=1),   # 32x32\n            nn.ReLU(),\n            nn.Conv2d(16, 32, 3, stride=2, padding=1),  # 16x16\n            nn.ReLU(),\n            nn.Flatten(),\n            nn.Linear(32 * 16 * 16, latent_dim)\n        )\n        self.decoder = nn.Sequential(\n            nn.Linear(latent_dim, 32 * 16 * 16),\n            nn.ReLU(),\n            nn.Unflatten(1, (32, 16, 16)),\n            nn.ConvTranspose2d(32, 16, 3, stride=2, padding=1, output_padding=1),  # 32x32\n            nn.ReLU(),\n            nn.ConvTranspose2d(16, 1, 3, stride=2, padding=1, output_padding=1),   # 64x64\n            nn.Sigmoid()\n        )\n\n    def forward(self, x):\n        z = self.encoder(x)\n        return self.decoder(z), z\n\nmodel = ConvAutoencoder(latent_dim=2)\nn_params = sum(p.numel() for p in model.parameters())\nprint(f\"Autoencoder parameters: {n_params:,}\")\n\nAutoencoder parameters: 50,531"
+  },
+  {
+    "objectID": "notebooks/MG/week11_latent_cahn_hilliard.html#training-loop",
+    "href": "notebooks/MG/week11_latent_cahn_hilliard.html#training-loop",
+    "title": "MG Week 11: Latent Space as Materials Genome Coordinate",
+    "section": "4. Training Loop",
+    "text": "4. Training Loop\n\ncriterion = nn.MSELoss()\noptimizer = torch.optim.Adam(model.parameters(), lr=1e-3)\ntrain_losses, val_losses = [], []\n\nfor epoch in range(30):\n    model.train()\n    ep_loss = 0.0\n    for x_batch, _ in train_loader:\n        optimizer.zero_grad()\n        x_recon, _ = model(x_batch)\n        loss = criterion(x_recon, x_batch)\n        loss.backward()\n        optimizer.step()\n        ep_loss += loss.item() * len(x_batch)\n    train_losses.append(ep_loss / n_train)\n\n    model.eval()\n    v_loss = 0.0\n    with torch.no_grad():\n        for x_batch, _ in val_loader:\n            x_recon, _ = model(x_batch)\n            v_loss += criterion(x_recon, x_batch).item() * len(x_batch)\n    val_losses.append(v_loss / n_val)\n    if (epoch + 1) % 10 == 0:\n        print(f\"Epoch {epoch+1:3d} | Train MSE: {train_losses[-1]:.5f} | Val MSE: {val_losses[-1]:.5f}\")\n\nplt.plot(train_losses, label='Train'); plt.plot(val_losses, label='Val')\nplt.xlabel(\"Epoch\"); plt.ylabel(\"Reconstruction MSE\")\nplt.title(\"Autoencoder Training\"); plt.legend()\nplt.tight_layout(); plt.show()\n\nEpoch  10 | Train MSE: 0.00311 | Val MSE: 0.00287\nEpoch  20 | Train MSE: 0.00101 | Val MSE: 0.00095\nEpoch  30 | Train MSE: 0.00060 | Val MSE: 0.00061"
+  },
+  {
+    "objectID": "notebooks/MG/week11_latent_cahn_hilliard.html#latent-space-colored-by-energy",
+    "href": "notebooks/MG/week11_latent_cahn_hilliard.html#latent-space-colored-by-energy",
+    "title": "MG Week 11: Latent Space as Materials Genome Coordinate",
+    "section": "5. Latent Space Colored by Energy",
+    "text": "5. Latent Space Colored by Energy\n\nall_z, all_energies = [], []\nmodel.eval()\nfull_loader = DataLoader(dataset, batch_size=64, shuffle=False)\nwith torch.no_grad():\n    for x_batch, y_batch in full_loader:\n        _, z = model(x_batch)\n        all_z.append(z.numpy())\n        all_energies.append(y_batch.numpy())\n\nall_z = np.concatenate(all_z, axis=0)\nall_energies = np.concatenate(all_energies, axis=0)\n\nfig, ax = plt.subplots(figsize=(8, 6))\nsc = ax.scatter(all_z[:, 0], all_z[:, 1], c=all_energies,\n                cmap='viridis', alpha=0.5, s=12)\nplt.colorbar(sc, ax=ax, label=\"Free energy\")\nax.set_xlabel(\"Latent dim 1\")\nax.set_ylabel(\"Latent dim 2\")\nax.set_title(\"Latent Space — colored by free energy\")\nplt.tight_layout()\nplt.show()\n\n\n\n\n\n\n\n\n\n# Check if energy ordering is preserved in latent space\n# Compute Spearman correlation between latent coords and energy\nfrom scipy.stats import spearmanr\n\nr1, p1 = spearmanr(all_z[:, 0], all_energies)\nr2, p2 = spearmanr(all_z[:, 1], all_energies)\nprint(f\"Spearman correlation: latent dim 1 vs energy: r={r1:.3f} (p={p1:.2e})\")\nprint(f\"Spearman correlation: latent dim 2 vs energy: r={r2:.3f} (p={p2:.2e})\")\nprint()\nif max(abs(r1), abs(r2)) &gt; 0.5:\n    print(\"Strong correlation: the latent space has organized microstructures\")\n    print(\"by their thermodynamic energy — a physically meaningful coordinate!\")\nelse:\n    print(\"Weak correlation: the latent dims may encode other structural features.\")\n    print(\"Try rerunning or increasing training epochs.\")\n\nSpearman correlation: latent dim 1 vs energy: r=0.665 (p=0.00e+00)\nSpearman correlation: latent dim 2 vs energy: r=0.392 (p=1.35e-109)\n\nStrong correlation: the latent space has organized microstructures\nby their thermodynamic energy — a physically meaningful coordinate!"
+  },
+  {
+    "objectID": "notebooks/MG/week11_latent_cahn_hilliard.html#reconstruction-quality",
+    "href": "notebooks/MG/week11_latent_cahn_hilliard.html#reconstruction-quality",
+    "title": "MG Week 11: Latent Space as Materials Genome Coordinate",
+    "section": "6. Reconstruction Quality",
+    "text": "6. Reconstruction Quality\n\nfig, axes = plt.subplots(2, 8, figsize=(16, 5))\nx_show = torch.stack([val_ds[i][0] for i in range(8)])\nwith torch.no_grad():\n    x_recon, _ = model(x_show)\nfor i in range(8):\n    axes[0, i].imshow(x_show[i].squeeze().numpy(), cmap='RdBu_r', vmin=0, vmax=1)\n    axes[1, i].imshow(x_recon[i].squeeze().numpy(), cmap='RdBu_r', vmin=0, vmax=1)\n    axes[0, i].axis('off'); axes[1, i].axis('off')\naxes[0, 0].set_ylabel(\"Original\",      fontsize=9)\naxes[1, 0].set_ylabel(\"Reconstructed\", fontsize=9)\nplt.suptitle(\"Original vs. Reconstructed Cahn-Hilliard Microstructures\")\nplt.tight_layout(); plt.show()"
+  },
+  {
+    "objectID": "notebooks/MG/week11_latent_cahn_hilliard.html#nearest-neighbor-retrieval-in-latent-space",
+    "href": "notebooks/MG/week11_latent_cahn_hilliard.html#nearest-neighbor-retrieval-in-latent-space",
+    "title": "MG Week 11: Latent Space as Materials Genome Coordinate",
+    "section": "7. Nearest-Neighbor Retrieval in Latent Space",
+    "text": "7. Nearest-Neighbor Retrieval in Latent Space\n\n# Given a query microstructure, find the 5 most similar ones by latent distance\nquery_idx = 0\nquery_z = all_z[query_idx:query_idx+1]  # (1, 2)\n\ndistances = np.linalg.norm(all_z - query_z, axis=1)\ntop5_idx = np.argsort(distances)[1:6]  # skip self (idx 0)\n\nfig, axes = plt.subplots(1, 6, figsize=(16, 3))\naxes[0].imshow(dataset[query_idx][0].squeeze().numpy(), cmap='RdBu_r', vmin=0, vmax=1)\naxes[0].set_title(f\"Query\\nE={dataset[query_idx][1]:.3f}\", fontsize=8)\naxes[0].axis('off')\n\nfor col, idx in enumerate(top5_idx, 1):\n    axes[col].imshow(dataset[idx][0].squeeze().numpy(), cmap='RdBu_r', vmin=0, vmax=1)\n    axes[col].set_title(f\"Rank {col}\\nE={dataset[idx][1]:.3f}\\nd={distances[idx]:.3f}\", fontsize=8)\n    axes[col].axis('off')\n\nplt.suptitle(\"Nearest-Neighbor Retrieval in Latent Space\")\nplt.tight_layout()\nplt.show()"
+  },
+  {
+    "objectID": "notebooks/MG/week11_latent_cahn_hilliard.html#exercises",
+    "href": "notebooks/MG/week11_latent_cahn_hilliard.html#exercises",
+    "title": "MG Week 11: Latent Space as Materials Genome Coordinate",
+    "section": "Exercises",
+    "text": "Exercises\n\nDoes the latent space preserve energy ordering? The Spearman correlation above quantifies this. Try training longer or with a larger latent_dim — does the correlation improve?\nTry simulation_number=-1 (all 18 simulations). How does the latent space look when trained on all data? Does the energy gradient in the scatter plot become clearer or more diffuse?\nFor the nearest-neighbor retrieval: do the 5 nearest neighbors have similar energies to the query? Compute the mean absolute energy difference between query and its 5 neighbors — how does this compare to the global energy standard deviation?"
+  },
+  {
+    "objectID": "notebooks/MG/week05_descriptors_elements.html",
+    "href": "notebooks/MG/week05_descriptors_elements.html",
+    "title": "MG Week 5: Feature Descriptors for Chemical Elements",
+    "section": "",
+    "text": "Open In Colab"
+  },
+  {
+    "objectID": "notebooks/MG/week05_descriptors_elements.html#learning-objectives",
+    "href": "notebooks/MG/week05_descriptors_elements.html#learning-objectives",
+    "title": "MG Week 5: Feature Descriptors for Chemical Elements",
+    "section": "Learning Objectives",
+    "text": "Learning Objectives\n\nUnderstand the role of feature descriptors in materials informatics\nIdentify which descriptors correlate most strongly with a target property\nAppreciate the challenges of training ML models on very small datasets"
+  },
+  {
+    "objectID": "notebooks/MG/week05_descriptors_elements.html#setup",
+    "href": "notebooks/MG/week05_descriptors_elements.html#setup",
+    "title": "MG Week 5: Feature Descriptors for Chemical Elements",
+    "section": "Setup",
+    "text": "Setup\n\n!pip install git+https://github.com/ECLIPSE-Lab/Ai4MatLectures.git \"mdsdata&gt;=0.1.5\"\n\n\nimport torch\nimport torch.nn as nn\nfrom torch.utils.data import DataLoader, random_split\nfrom ai4mat.datasets import ChemicalElementsDataset\nimport matplotlib.pyplot as plt\nimport numpy as np"
+  },
+  {
+    "objectID": "notebooks/MG/week05_descriptors_elements.html#load-the-data",
+    "href": "notebooks/MG/week05_descriptors_elements.html#load-the-data",
+    "title": "MG Week 5: Feature Descriptors for Chemical Elements",
+    "section": "1. Load the Data",
+    "text": "1. Load the Data\n\nds = ChemicalElementsDataset()\nprint(f\"Dataset size: {len(ds)}\")\nx0, y0 = ds[0]\nprint(f\"Sample x shape: {x0.shape}, dtype: {x0.dtype}\")\nprint(f\"Sample y (target property): {y0:.4f}, dtype: {y0.dtype}\")\n\nn_features = ds[0][0].shape[0]\nprint(f\"\\nNumber of features: {n_features}\")\n\nDataset size: 38\nSample x shape: torch.Size([4]), dtype: torch.float32\nSample y (target property): 1.0000, dtype: torch.float32\n\nNumber of features: 4\n\n\n\n# Collect all data\nX_all = torch.stack([ds[i][0] for i in range(len(ds))]).numpy()\ny_all = torch.tensor([ds[i][1].item() for i in range(len(ds))]).numpy()\n\nprint(f\"X shape: {X_all.shape}\")\nprint(f\"y range: [{y_all.min():.3f}, {y_all.max():.3f}]\")\nprint(f\"\\nIMPORTANT: Only {len(ds)} samples. This is an extremely small dataset.\")\nprint(\"Train/val splits will give only ~7 validation samples.\")\nprint(\"In practice, cross-validation would be more reliable than a single split.\")\n\nX shape: (38, 4)\ny range: [0.000, 1.000]\n\nIMPORTANT: Only 38 samples. This is an extremely small dataset.\nTrain/val splits will give only ~7 validation samples.\nIn practice, cross-validation would be more reliable than a single split."
+  },
+  {
+    "objectID": "notebooks/MG/week05_descriptors_elements.html#correlation-analysis",
+    "href": "notebooks/MG/week05_descriptors_elements.html#correlation-analysis",
+    "title": "MG Week 5: Feature Descriptors for Chemical Elements",
+    "section": "2. Correlation Analysis",
+    "text": "2. Correlation Analysis\nBefore training any model, explore which features correlate with the target.\n\nfeature_names = [f\"Feature {i}\" for i in range(n_features)]\n\n# Compute Pearson correlation between each feature and target\ncorrelations = []\nfor j in range(n_features):\n    x_j = X_all[:, j]\n    r = np.corrcoef(x_j, y_all)[0, 1]\n    correlations.append(r)\n\nprint(\"Pearson correlation with target:\")\nfor j, (name, r) in enumerate(zip(feature_names, correlations)):\n    bar = \"#\" * int(abs(r) * 30)\n    sign = \"+\" if r &gt;= 0 else \"-\"\n    print(f\"  {name}: {r:+.3f}  {sign}{bar}\")\n\nPearson correlation with target:\n  Feature 0: +0.510  +###############\n  Feature 1: -0.615  -##################\n  Feature 2: -0.795  -#######################\n  Feature 3: -0.760  -######################\n\n\n\n# Feature-target scatter plots\nfig, axes = plt.subplots(1, n_features, figsize=(4 * n_features, 4))\nfor j, ax in enumerate(axes):\n    ax.scatter(X_all[:, j], y_all, alpha=0.6, s=30)\n    ax.set_xlabel(feature_names[j])\n    ax.set_ylabel(\"Target\")\n    ax.set_title(f\"r={correlations[j]:+.3f}\")\nplt.suptitle(\"Feature vs. Target Scatter Plots\")\nplt.tight_layout()\nplt.show()\n\n\n\n\n\n\n\n\n\n# Correlation heatmap (features + target)\ndata_for_corr = np.column_stack([X_all, y_all])\nlabels_corr = feature_names + [\"Target\"]\nC = np.corrcoef(data_for_corr.T)\n\nfig, ax = plt.subplots(figsize=(5, 4))\nim = ax.imshow(C, cmap='RdBu_r', vmin=-1, vmax=1)\nplt.colorbar(im, ax=ax)\nax.set_xticks(range(len(labels_corr))); ax.set_xticklabels(labels_corr, rotation=45, ha='right')\nax.set_yticks(range(len(labels_corr))); ax.set_yticklabels(labels_corr)\nax.set_title(\"Correlation Matrix\")\nfor i in range(len(labels_corr)):\n    for j in range(len(labels_corr)):\n        ax.text(j, i, f\"{C[i,j]:.2f}\", ha='center', va='center', fontsize=7)\nplt.tight_layout()\nplt.show()"
+  },
+  {
+    "objectID": "notebooks/MG/week05_descriptors_elements.html#trainval-split",
+    "href": "notebooks/MG/week05_descriptors_elements.html#trainval-split",
+    "title": "MG Week 5: Feature Descriptors for Chemical Elements",
+    "section": "3. Train/Val Split",
+    "text": "3. Train/Val Split\n\nn_train = int(0.8 * len(ds))\nn_val = len(ds) - n_train\ntrain_ds, val_ds = random_split(ds, [n_train, n_val])\n\ntrain_loader = DataLoader(train_ds, batch_size=16, shuffle=True)\nval_loader   = DataLoader(val_ds,   batch_size=16, shuffle=False)\nprint(f\"Train: {n_train} | Val: {n_val}\")\nprint(f\"Warning: only {n_val} validation samples — results may be noisy!\")\n\nTrain: 30 | Val: 8\nWarning: only 8 validation samples — results may be noisy!"
+  },
+  {
+    "objectID": "notebooks/MG/week05_descriptors_elements.html#define-the-model",
+    "href": "notebooks/MG/week05_descriptors_elements.html#define-the-model",
+    "title": "MG Week 5: Feature Descriptors for Chemical Elements",
+    "section": "4. Define the Model",
+    "text": "4. Define the Model\n\n# Start with linear model (most interpretable)\nlinear_model = nn.Linear(n_features, 1)\nprint(f\"Linear model: {n_features} features → 1 output\")\n\n# Then small MLP\nmlp_model = nn.Sequential(\n    nn.Linear(n_features, 16), nn.ReLU(),\n    nn.Linear(16, 8), nn.ReLU(),\n    nn.Linear(8, 1)\n)\nprint(f\"MLP model: {sum(p.numel() for p in mlp_model.parameters())} parameters\")\n\nLinear model: 4 features → 1 output\nMLP model: 225 parameters"
+  },
+  {
+    "objectID": "notebooks/MG/week05_descriptors_elements.html#training-loop",
+    "href": "notebooks/MG/week05_descriptors_elements.html#training-loop",
+    "title": "MG Week 5: Feature Descriptors for Chemical Elements",
+    "section": "5. Training Loop",
+    "text": "5. Training Loop\n\ndef train_regression(model, train_loader, val_loader, n_train, n_val, epochs=200, lr=1e-3):\n    criterion = nn.MSELoss()\n    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)\n    train_losses, val_losses = [], []\n    for epoch in range(epochs):\n        model.train()\n        ep_loss = 0.0\n        for x_batch, y_batch in train_loader:\n            optimizer.zero_grad()\n            y_pred = model(x_batch).squeeze(-1)\n            loss = criterion(y_pred, y_batch)\n            loss.backward()\n            optimizer.step()\n            ep_loss += loss.item() * len(x_batch)\n        train_losses.append(ep_loss / n_train)\n\n        model.eval()\n        v_loss = 0.0\n        with torch.no_grad():\n            for x_batch, y_batch in val_loader:\n                y_pred = model(x_batch).squeeze(-1)\n                v_loss += criterion(y_pred, y_batch).item() * len(x_batch)\n        val_losses.append(v_loss / n_val)\n    return train_losses, val_losses\n\ntorch.manual_seed(42)\nlin_tl, lin_vl = train_regression(linear_model, train_loader, val_loader, n_train, n_val)\ntorch.manual_seed(42)\nmlp_tl, mlp_vl = train_regression(mlp_model,    train_loader, val_loader, n_train, n_val)\n\nprint(f\"Linear model — final val MSE: {lin_vl[-1]:.4f}\")\nprint(f\"MLP model    — final val MSE: {mlp_vl[-1]:.4f}\")\n\nLinear model — final val MSE: 153.8912\nMLP model    — final val MSE: 0.3664"
+  },
+  {
+    "objectID": "notebooks/MG/week05_descriptors_elements.html#evaluation",
+    "href": "notebooks/MG/week05_descriptors_elements.html#evaluation",
+    "title": "MG Week 5: Feature Descriptors for Chemical Elements",
+    "section": "6. Evaluation",
+    "text": "6. Evaluation\n\nfig, axes = plt.subplots(1, 2, figsize=(14, 4))\n\naxes[0].plot(lin_tl, label='Linear train'); axes[0].plot(lin_vl, '--', label='Linear val')\naxes[0].plot(mlp_tl, label='MLP train');    axes[0].plot(mlp_vl, '--', label='MLP val')\naxes[0].set_xlabel(\"Epoch\"); axes[0].set_ylabel(\"MSE\"); axes[0].set_title(\"Loss Curves\")\naxes[0].legend()\n\n# Parity plot: predicted vs true\nX_tensor = torch.tensor(X_all, dtype=torch.float32)\ny_tensor = torch.tensor(y_all, dtype=torch.float32)\nlinear_model.eval(); mlp_model.eval()\nwith torch.no_grad():\n    y_lin = linear_model(X_tensor).squeeze(-1).numpy()\n    y_mlp = mlp_model(X_tensor).squeeze(-1).numpy()\n\naxes[1].scatter(y_all, y_lin, alpha=0.6, label='Linear', s=30)\naxes[1].scatter(y_all, y_mlp, alpha=0.6, label='MLP',    s=30)\nlim = [y_all.min() * 0.95, y_all.max() * 1.05]\naxes[1].plot(lim, lim, 'k--', label='y=x')\naxes[1].set_xlabel(\"True\"); axes[1].set_ylabel(\"Predicted\")\naxes[1].set_title(\"Parity Plot (all 38 samples)\"); axes[1].legend()\n\nplt.tight_layout(); plt.show()"
+  },
+  {
+    "objectID": "notebooks/MG/week05_descriptors_elements.html#exercises",
+    "href": "notebooks/MG/week05_descriptors_elements.html#exercises",
+    "title": "MG Week 5: Feature Descriptors for Chemical Elements",
+    "section": "Exercises",
+    "text": "Exercises\n\nWhich feature has the highest absolute Pearson correlation with the target? Train a linear model using only that single feature (nn.Linear(1, 1)). How much worse is the R² compared to using all 4 features?\nWith only 38 samples, is a single 80/20 train/val split meaningful? Try splitting 5 different ways using different random_split calls. How much does the reported val MSE vary?\nIn real materials informatics, domain knowledge guides descriptor choice. If you knew one feature was “atomic number” and another was “electronegativity,” which would you expect to correlate most with melting point? How does the correlation analysis confirm or challenge this intuition?"
+  },
+  {
+    "objectID": "notebooks/MLPC/week07_process_monitoring_tensile.html",
+    "href": "notebooks/MLPC/week07_process_monitoring_tensile.html",
+    "title": "MLPC Week 7: MLP Surrogate for Process Monitoring",
+    "section": "",
+    "text": "Open In Colab"
+  },
+  {
+    "objectID": "notebooks/MLPC/week07_process_monitoring_tensile.html#learning-objectives",
+    "href": "notebooks/MLPC/week07_process_monitoring_tensile.html#learning-objectives",
+    "title": "MLPC Week 7: MLP Surrogate for Process Monitoring",
+    "section": "Learning Objectives",
+    "text": "Learning Objectives\n\nFrame regression as surrogate modeling for process monitoring\nTrain and compare MLP models across different process conditions\nUnderstand why models trained on one condition fail on another"
+  },
+  {
+    "objectID": "notebooks/MLPC/week07_process_monitoring_tensile.html#setup",
+    "href": "notebooks/MLPC/week07_process_monitoring_tensile.html#setup",
+    "title": "MLPC Week 7: MLP Surrogate for Process Monitoring",
+    "section": "Setup",
+    "text": "Setup\n\n!pip install git+https://github.com/ECLIPSE-Lab/Ai4MatLectures.git \"mdsdata&gt;=0.1.5\"\n\n\nimport torch\nimport torch.nn as nn\nfrom torch.utils.data import DataLoader, random_split\nfrom ai4mat.datasets import TensileTestDataset\nimport matplotlib.pyplot as plt\nimport numpy as np"
+  },
+  {
+    "objectID": "notebooks/MLPC/week07_process_monitoring_tensile.html#load-the-data",
+    "href": "notebooks/MLPC/week07_process_monitoring_tensile.html#load-the-data",
+    "title": "MLPC Week 7: MLP Surrogate for Process Monitoring",
+    "section": "1. Load the Data",
+    "text": "1. Load the Data\nThe TensileTestDataset simulates a process monitoring scenario: given a measured strain value, predict the resulting stress. Each temperature is a different process condition.\n\ntemperatures = [0, 400, 600]\ndatasets = {T: TensileTestDataset(temperature=T) for T in temperatures}\n\nfor T, ds in datasets.items():\n    x0, y0 = ds[0]\n    print(f\"T={T:3d}°C | size: {len(ds):4d} | x: {x0.shape} | y range: [{min(ds[i][1].item() for i in range(len(ds))):.1f}, {max(ds[i][1].item() for i in range(len(ds))):.1f}] MPa\")\n\nT=  0°C | size:  350 | x: torch.Size([1]) | y range: [-0.0, 68.4] MPa\nT=400°C | size:  350 | x: torch.Size([1]) | y range: [-0.1, 54.4] MPa\nT=600°C | size:  350 | x: torch.Size([1]) | y range: [-0.1, 28.1] MPa\n\n\n\nfig, ax = plt.subplots(figsize=(8, 5))\ncolors_T = {0: 'tab:blue', 400: 'tab:orange', 600: 'tab:red'}\nfor T, ds in datasets.items():\n    X = torch.stack([ds[i][0] for i in range(len(ds))]).squeeze().numpy()\n    y = torch.stack([ds[i][1] for i in range(len(ds))]).numpy()\n    order = X.argsort()\n    ax.scatter(X, y, s=8, alpha=0.3, color=colors_T[T])\n    ax.plot(X[order], y[order], color=colors_T[T], label=f\"T={T}°C\", lw=1.5)\n\nax.set_xlabel(\"Strain\")\nax.set_ylabel(\"Stress (MPa)\")\nax.set_title(\"Stress-Strain Curves at Three Temperatures\")\nax.legend()\nplt.tight_layout()\nplt.show()"
+  },
+  {
+    "objectID": "notebooks/MLPC/week07_process_monitoring_tensile.html#trainval-split",
+    "href": "notebooks/MLPC/week07_process_monitoring_tensile.html#trainval-split",
+    "title": "MLPC Week 7: MLP Surrogate for Process Monitoring",
+    "section": "2. Train/Val Split",
+    "text": "2. Train/Val Split\n\nsplits = {}\nloaders = {}\nfor T, ds in datasets.items():\n    n_train = int(0.8 * len(ds))\n    n_val = len(ds) - n_train\n    train_ds, val_ds = random_split(ds, [n_train, n_val])\n    splits[T] = (n_train, n_val, train_ds, val_ds)\n    loaders[T] = {\n        'train': DataLoader(train_ds, batch_size=32, shuffle=True),\n        'val':   DataLoader(val_ds,   batch_size=32, shuffle=False)\n    }\n    print(f\"T={T}°C: train={n_train}, val={n_val}\")\n\nT=0°C: train=280, val=70\nT=400°C: train=280, val=70\nT=600°C: train=280, val=70"
+  },
+  {
+    "objectID": "notebooks/MLPC/week07_process_monitoring_tensile.html#define-the-model",
+    "href": "notebooks/MLPC/week07_process_monitoring_tensile.html#define-the-model",
+    "title": "MLPC Week 7: MLP Surrogate for Process Monitoring",
+    "section": "3. Define the Model",
+    "text": "3. Define the Model\n\ndef make_mlp():\n    return nn.Sequential(\n        nn.Linear(1, 32), nn.ReLU(),\n        nn.Linear(32, 16), nn.ReLU(),\n        nn.Linear(16, 1)\n    )\n\nmodel_test = make_mlp()\nprint(model_test)\nprint(f\"Parameters: {sum(p.numel() for p in model_test.parameters())}\")\n\nSequential(\n  (0): Linear(in_features=1, out_features=32, bias=True)\n  (1): ReLU()\n  (2): Linear(in_features=32, out_features=16, bias=True)\n  (3): ReLU()\n  (4): Linear(in_features=16, out_features=1, bias=True)\n)\nParameters: 609"
+  },
+  {
+    "objectID": "notebooks/MLPC/week07_process_monitoring_tensile.html#training-loop",
+    "href": "notebooks/MLPC/week07_process_monitoring_tensile.html#training-loop",
+    "title": "MLPC Week 7: MLP Surrogate for Process Monitoring",
+    "section": "4. Training Loop",
+    "text": "4. Training Loop\n\ndef train_regression(model, train_loader, val_loader, n_train, n_val, epochs=100, lr=1e-3):\n    criterion = nn.MSELoss()\n    optimizer = torch.optim.Adam(model.parameters(), lr=lr)\n    train_losses, val_losses = [], []\n    for epoch in range(epochs):\n        model.train()\n        ep_loss = 0.0\n        for x_batch, y_batch in train_loader:\n            optimizer.zero_grad()\n            y_pred = model(x_batch).squeeze(-1)\n            loss = criterion(y_pred, y_batch)\n            loss.backward()\n            optimizer.step()\n            ep_loss += loss.item() * len(x_batch)\n        train_losses.append(ep_loss / n_train)\n\n        model.eval()\n        v_loss = 0.0\n        with torch.no_grad():\n            for x_batch, y_batch in val_loader:\n                y_pred = model(x_batch).squeeze(-1)\n                v_loss += criterion(y_pred, y_batch).item() * len(x_batch)\n        val_losses.append(v_loss / n_val)\n    return train_losses, val_losses\n\nmodels = {}\ntorch.manual_seed(0)\nfor T in temperatures:\n    n_train, n_val, train_ds, val_ds = splits[T]\n    m = make_mlp()\n    tl, vl = train_regression(m, loaders[T]['train'], loaders[T]['val'], n_train, n_val)\n    models[T] = m\n    print(f\"T={T}°C | final val MSE: {vl[-1]:.2f}\")\n\nT=0°C | final val MSE: 180.06\nT=400°C | final val MSE: 89.87\nT=600°C | final val MSE: 30.54"
+  },
+  {
+    "objectID": "notebooks/MLPC/week07_process_monitoring_tensile.html#evaluation",
+    "href": "notebooks/MLPC/week07_process_monitoring_tensile.html#evaluation",
+    "title": "MLPC Week 7: MLP Surrogate for Process Monitoring",
+    "section": "5. Evaluation",
+    "text": "5. Evaluation\n\n# Compare predictions for all three temperatures in one figure\nfig, ax = plt.subplots(figsize=(9, 6))\n\nfor T, ds in datasets.items():\n    X = torch.stack([ds[i][0] for i in range(len(ds))])\n    y_true = torch.stack([ds[i][1] for i in range(len(ds))]).numpy()\n    X_sq = X.squeeze().numpy()\n    order = X_sq.argsort()\n\n    models[T].eval()\n    with torch.no_grad():\n        y_pred = models[T](X).squeeze(-1).numpy()\n\n    ax.scatter(X_sq, y_true, s=6, alpha=0.2, color=colors_T[T])\n    ax.plot(X_sq[order], y_pred[order], color=colors_T[T], lw=2, label=f\"MLP fit T={T}°C\")\n\nax.set_xlabel(\"Strain\"); ax.set_ylabel(\"Stress (MPa)\")\nax.set_title(\"MLP Surrogate Model — All Temperatures\")\nax.legend(); plt.tight_layout(); plt.show()\n\n\n\n\n\n\n\n\n\n# Cross-temperature generalization: train on T=0, test on T=600\nprint(\"Cross-temperature test: train on T=0, evaluate on T=600\")\n\nn_train_0, n_val_0, _, _ = splits[0]\nds_600 = datasets[600]\nX_600 = torch.stack([ds_600[i][0] for i in range(len(ds_600))])\ny_600 = torch.stack([ds_600[i][1] for i in range(len(ds_600))])\n\nmodels[0].eval()\nwith torch.no_grad():\n    y_pred_600 = models[0](X_600).squeeze(-1)\n\nmse_cross = nn.MSELoss()(y_pred_600, y_600).item()\nmse_same  = nn.MSELoss()(\n    models[600](X_600).squeeze(-1), y_600\n).item()\n\nprint(f\"  MSE (model_T=0   → data_T=600): {mse_cross:.2f}\")\nprint(f\"  MSE (model_T=600 → data_T=600): {mse_same:.2f}\")\nprint(f\"  Ratio: {mse_cross / mse_same:.1f}x worse\")\nprint(\"\\nConclusion: a model trained on one temperature does NOT generalize\")\nprint(\"to another — the stress-strain relationship changes fundamentally.\")\n\nCross-temperature test: train on T=0, evaluate on T=600\n  MSE (model_T=0   → data_T=600): 1027.78\n  MSE (model_T=600 → data_T=600): 24.52\n  Ratio: 41.9x worse\n\nConclusion: a model trained on one temperature does NOT generalize\nto another — the stress-strain relationship changes fundamentally."
+  },
+  {
+    "objectID": "notebooks/MLPC/week07_process_monitoring_tensile.html#exercises",
+    "href": "notebooks/MLPC/week07_process_monitoring_tensile.html#exercises",
+    "title": "MLPC Week 7: MLP Surrogate for Process Monitoring",
+    "section": "Exercises",
+    "text": "Exercises\n\nTrain a model on T=0 data and evaluate it on T=600. Visualize the prediction error — where does the model fail most? Why?\nCan a single model handle all temperatures if temperature is an additional input? Build nn.Sequential(nn.Linear(2, 32), ...) and train on all three datasets combined (append temperature as a second input feature).\nFor uncertainty quantification, one approach is to predict both mean and variance. Change the output to 2 neurons and use a Gaussian NLL loss: nn.GaussianNLLLoss(). What changes in the training loop?"
+  },
+  {
+    "objectID": "notebooks/MLPC/week11_anomaly_cahn_hilliard.html",
+    "href": "notebooks/MLPC/week11_anomaly_cahn_hilliard.html",
+    "title": "MLPC Week 11: Anomaly Detection with Autoencoders",
+    "section": "",
+    "text": "Open In Colab"
+  },
+  {
+    "objectID": "notebooks/MLPC/week11_anomaly_cahn_hilliard.html#learning-objectives",
+    "href": "notebooks/MLPC/week11_anomaly_cahn_hilliard.html#learning-objectives",
+    "title": "MLPC Week 11: Anomaly Detection with Autoencoders",
+    "section": "Learning Objectives",
+    "text": "Learning Objectives\n\nUse an autoencoder’s reconstruction error as an anomaly score\nTrain on one distribution and detect samples from a different distribution\nSet detection thresholds and visualize highest-error samples"
+  },
+  {
+    "objectID": "notebooks/MLPC/week11_anomaly_cahn_hilliard.html#setup",
+    "href": "notebooks/MLPC/week11_anomaly_cahn_hilliard.html#setup",
+    "title": "MLPC Week 11: Anomaly Detection with Autoencoders",
+    "section": "Setup",
+    "text": "Setup\n\n!pip install git+https://github.com/ECLIPSE-Lab/Ai4MatLectures.git \"mdsdata&gt;=0.1.5\"\n\n\nimport torch\nimport torch.nn as nn\nfrom torch.utils.data import DataLoader\nfrom ai4mat.datasets import CahnHilliardDataset\nimport matplotlib.pyplot as plt\nimport numpy as np"
+  },
+  {
+    "objectID": "notebooks/MLPC/week11_anomaly_cahn_hilliard.html#load-the-data",
+    "href": "notebooks/MLPC/week11_anomaly_cahn_hilliard.html#load-the-data",
+    "title": "MLPC Week 11: Anomaly Detection with Autoencoders",
+    "section": "1. Load the Data",
+    "text": "1. Load the Data\nWe train on one simulation and treat a different simulation as “out-of-distribution” (anomalous).\n\ntrain_dataset = CahnHilliardDataset(simulation_number=0)\ntest_dataset  = CahnHilliardDataset(simulation_number=1)\n\nprint(f\"Train dataset (sim 0): {len(train_dataset)} samples\")\nprint(f\"Test  dataset (sim 1): {len(test_dataset)} samples\")\n\nx0, y0 = train_dataset[0]\nprint(f\"\\nSample x shape: {x0.shape}  (1, 64, 64)\")\nprint(f\"Sample y (energy): {y0:.4f}\")\n\nTrain dataset (sim 0): 989 samples\nTest  dataset (sim 1): 992 samples\n\nSample x shape: torch.Size([1, 64, 64])  (1, 64, 64)\nSample y (energy): 586.8312\n\n\n\n# Visualize microstructure snapshots from both simulations\nfig, axes = plt.subplots(2, 6, figsize=(16, 6))\nfor i in range(6):\n    idx = i * (len(train_dataset) // 6)\n    axes[0, i].imshow(train_dataset[idx][0].squeeze().numpy(), cmap='RdBu_r', vmin=0, vmax=1)\n    axes[0, i].set_title(f\"E={train_dataset[idx][1]:.3f}\", fontsize=8)\n    axes[0, i].axis('off')\n    axes[1, i].imshow(test_dataset[idx][0].squeeze().numpy(), cmap='RdBu_r', vmin=0, vmax=1)\n    axes[1, i].set_title(f\"E={test_dataset[idx][1]:.3f}\", fontsize=8)\n    axes[1, i].axis('off')\n\naxes[0, 0].set_ylabel(\"Sim 0 (train)\", fontsize=9)\naxes[1, 0].set_ylabel(\"Sim 1 (test)\",  fontsize=9)\nplt.suptitle(\"Cahn-Hilliard microstructures — red/blue = phase separation\")\nplt.tight_layout()\nplt.show()"
+  },
+  {
+    "objectID": "notebooks/MLPC/week11_anomaly_cahn_hilliard.html#build-the-autoencoder",
+    "href": "notebooks/MLPC/week11_anomaly_cahn_hilliard.html#build-the-autoencoder",
+    "title": "MLPC Week 11: Anomaly Detection with Autoencoders",
+    "section": "2. Build the Autoencoder",
+    "text": "2. Build the Autoencoder\n\nclass ConvAutoencoder(nn.Module):\n    def __init__(self, latent_dim=2):\n        super().__init__()\n        self.encoder = nn.Sequential(\n            nn.Conv2d(1, 16, 3, stride=2, padding=1),   # 32x32\n            nn.ReLU(),\n            nn.Conv2d(16, 32, 3, stride=2, padding=1),  # 16x16\n            nn.ReLU(),\n            nn.Flatten(),\n            nn.Linear(32 * 16 * 16, latent_dim)\n        )\n        self.decoder = nn.Sequential(\n            nn.Linear(latent_dim, 32 * 16 * 16),\n            nn.ReLU(),\n            nn.Unflatten(1, (32, 16, 16)),\n            nn.ConvTranspose2d(32, 16, 3, stride=2, padding=1, output_padding=1),  # 32x32\n            nn.ReLU(),\n            nn.ConvTranspose2d(16, 1, 3, stride=2, padding=1, output_padding=1),   # 64x64\n            nn.Sigmoid()\n        )\n\n    def forward(self, x):\n        z = self.encoder(x)\n        return self.decoder(z), z\n\nmodel = ConvAutoencoder(latent_dim=16)\nn_params = sum(p.numel() for p in model.parameters())\nprint(f\"Autoencoder parameters: {n_params:,}\")\n\nAutoencoder parameters: 279,921"
+  },
+  {
+    "objectID": "notebooks/MLPC/week11_anomaly_cahn_hilliard.html#train-on-simulation-0",
+    "href": "notebooks/MLPC/week11_anomaly_cahn_hilliard.html#train-on-simulation-0",
+    "title": "MLPC Week 11: Anomaly Detection with Autoencoders",
+    "section": "3. Train on Simulation 0",
+    "text": "3. Train on Simulation 0\n\ntrain_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)\ncriterion    = nn.MSELoss()\noptimizer    = torch.optim.Adam(model.parameters(), lr=1e-3)\n\ntrain_losses = []\nfor epoch in range(30):\n    model.train()\n    ep_loss = 0.0\n    for x_batch, _ in train_loader:  # labels (energy) not used during AE training\n        optimizer.zero_grad()\n        x_recon, _ = model(x_batch)\n        loss = criterion(x_recon, x_batch)\n        loss.backward()\n        optimizer.step()\n        ep_loss += loss.item() * len(x_batch)\n    train_losses.append(ep_loss / len(train_dataset))\n    if (epoch + 1) % 10 == 0:\n        print(f\"Epoch {epoch+1:3d} | Train recon MSE: {train_losses[-1]:.5f}\")\n\nplt.plot(train_losses)\nplt.xlabel(\"Epoch\"); plt.ylabel(\"Reconstruction MSE\")\nplt.title(\"Autoencoder Training on Simulation 0\")\nplt.tight_layout(); plt.show()\n\nEpoch  10 | Train recon MSE: 0.00056\nEpoch  20 | Train recon MSE: 0.00021\nEpoch  30 | Train recon MSE: 0.00013"
+  },
+  {
+    "objectID": "notebooks/MLPC/week11_anomaly_cahn_hilliard.html#score-reconstruction-error-as-anomaly-signal",
+    "href": "notebooks/MLPC/week11_anomaly_cahn_hilliard.html#score-reconstruction-error-as-anomaly-signal",
+    "title": "MLPC Week 11: Anomaly Detection with Autoencoders",
+    "section": "4. Score: Reconstruction Error as Anomaly Signal",
+    "text": "4. Score: Reconstruction Error as Anomaly Signal\n\ndef compute_errors(dataset, model, batch_size=64):\n    \"\"\"Return per-sample reconstruction MSE.\"\"\"\n    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False)\n    errors = []\n    model.eval()\n    with torch.no_grad():\n        for x_batch, _ in loader:\n            x_recon, _ = model(x_batch)\n            # Per-sample MSE: mean over pixels\n            per_sample = ((x_recon - x_batch) ** 2).mean(dim=(1, 2, 3))\n            errors.extend(per_sample.numpy().tolist())\n    return np.array(errors)\n\nerrors_train = compute_errors(train_dataset, model)\nerrors_test  = compute_errors(test_dataset,  model)\n\nprint(f\"Train (sim 0) — mean error: {errors_train.mean():.5f} ± {errors_train.std():.5f}\")\nprint(f\"Test  (sim 1) — mean error: {errors_test.mean():.5f}  ± {errors_test.std():.5f}\")\n\nTrain (sim 0) — mean error: 0.00012 ± 0.00011\nTest  (sim 1) — mean error: 0.15296  ± 0.02372"
+  },
+  {
+    "objectID": "notebooks/MLPC/week11_anomaly_cahn_hilliard.html#detect-anomalies",
+    "href": "notebooks/MLPC/week11_anomaly_cahn_hilliard.html#detect-anomalies",
+    "title": "MLPC Week 11: Anomaly Detection with Autoencoders",
+    "section": "5. Detect Anomalies",
+    "text": "5. Detect Anomalies\n\n# Histogram of reconstruction errors\nplt.figure(figsize=(8, 4))\nbins = np.linspace(0, max(errors_train.max(), errors_test.max()) * 1.05, 50)\nplt.hist(errors_train, bins=bins, alpha=0.6, color='tab:blue', label='Train (sim 0 — normal)')\nplt.hist(errors_test,  bins=bins, alpha=0.6, color='tab:red',  label='Test  (sim 1 — OOD)')\n\n# Simple threshold: mean + 2*std of training errors\nthreshold = errors_train.mean() + 2 * errors_train.std()\nplt.axvline(threshold, color='black', linestyle='--', label=f'Threshold = {threshold:.5f}')\nplt.xlabel(\"Reconstruction MSE\"); plt.ylabel(\"Count\")\nplt.title(\"Anomaly Detection: Reconstruction Error Distribution\")\nplt.legend(); plt.tight_layout(); plt.show()\n\nflagged_train = (errors_train &gt; threshold).mean() * 100\nflagged_test  = (errors_test  &gt; threshold).mean() * 100\nprint(f\"\\nFlagged as anomalous:\")\nprint(f\"  Train (sim 0): {flagged_train:.1f}%  (false positive rate)\")\nprint(f\"  Test  (sim 1): {flagged_test:.1f}%   (detection rate)\")\n\n\n\n\n\n\n\n\n\nFlagged as anomalous:\n  Train (sim 0): 5.0%  (false positive rate)\n  Test  (sim 1): 100.0%   (detection rate)\n\n\n\n# Show the 5 highest-error images alongside their reconstructions\ntop5_idx = np.argsort(errors_test)[-5:][::-1]\n\nfig, axes = plt.subplots(2, 5, figsize=(14, 6))\nfor col, idx in enumerate(top5_idx):\n    x_orig = test_dataset[idx][0].unsqueeze(0)\n    with torch.no_grad():\n        x_recon, _ = model(x_orig)\n\n    axes[0, col].imshow(x_orig.squeeze().numpy(), cmap='RdBu_r', vmin=0, vmax=1)\n    axes[0, col].set_title(f\"err={errors_test[idx]:.4f}\", fontsize=8)\n    axes[0, col].axis('off')\n\n    axes[1, col].imshow(x_recon.squeeze().numpy(), cmap='RdBu_r', vmin=0, vmax=1)\n    axes[1, col].axis('off')\n\naxes[0, 0].set_ylabel(\"Original (sim 1)\", fontsize=9)\naxes[1, 0].set_ylabel(\"Reconstructed\",    fontsize=9)\nplt.suptitle(\"5 Highest-Error Test Images (anomalies)\")\nplt.tight_layout()\nplt.show()"
+  },
+  {
+    "objectID": "notebooks/MLPC/week11_anomaly_cahn_hilliard.html#exercises",
+    "href": "notebooks/MLPC/week11_anomaly_cahn_hilliard.html#exercises",
+    "title": "MLPC Week 11: Anomaly Detection with Autoencoders",
+    "section": "Exercises",
+    "text": "Exercises\n\nWhat threshold would you set to catch 90% of simulation-1 samples while keeping the false positive rate below 10%? Adjust the multiplier in mean + k * std.\nTry training on simulation_number=[0, 1, 2] (three simulations combined). Does the detection rate for simulation-1 samples decrease? What does this tell you about the training distribution?\nWhat other types of microstructure anomalies could this approach detect — for example, images with different phase fractions, coarser morphology, or added noise?"
+  },
+  {
+    "objectID": "notebooks/MLPC/week05_cnn_ising_light.html",
+    "href": "notebooks/MLPC/week05_cnn_ising_light.html",
+    "title": "MLPC Week 5: Convolutional Neural Network (Light)",
+    "section": "",
+    "text": "Open In Colab"
+  },
+  {
+    "objectID": "notebooks/MLPC/week05_cnn_ising_light.html#learning-objectives",
+    "href": "notebooks/MLPC/week05_cnn_ising_light.html#learning-objectives",
+    "title": "MLPC Week 5: Convolutional Neural Network (Light)",
+    "section": "Learning Objectives",
+    "text": "Learning Objectives\n\nUnderstand nn.Conv2d and how it extracts spatial features\nTrace feature map dimensions through conv and pooling layers\nCompare CNN accuracy to a linear (flattened) baseline"
+  },
+  {
+    "objectID": "notebooks/MLPC/week05_cnn_ising_light.html#setup",
+    "href": "notebooks/MLPC/week05_cnn_ising_light.html#setup",
+    "title": "MLPC Week 5: Convolutional Neural Network (Light)",
+    "section": "Setup",
+    "text": "Setup\n\n!pip install git+https://github.com/ECLIPSE-Lab/Ai4MatLectures.git \"mdsdata&gt;=0.1.5\"\n\n\nimport torch\nimport torch.nn as nn\nfrom torch.utils.data import DataLoader, random_split\nfrom ai4mat.datasets import IsingDataset\nimport matplotlib.pyplot as plt\nimport numpy as np"
+  },
+  {
+    "objectID": "notebooks/MLPC/week05_cnn_ising_light.html#load-the-data",
+    "href": "notebooks/MLPC/week05_cnn_ising_light.html#load-the-data",
+    "title": "MLPC Week 5: Convolutional Neural Network (Light)",
+    "section": "1. Load the Data",
+    "text": "1. Load the Data\n\ndataset = IsingDataset(size='light')\nprint(f\"Dataset size: {len(dataset)}\")\nx0, y0 = dataset[0]\nprint(f\"Sample x shape: {x0.shape}  (C=1, H=16, W=16)\")\nprint(f\"Sample y: {y0}  (0=disordered, 1=ordered)\")\n\nDataset size: 5000\nSample x shape: torch.Size([1, 16, 16])  (C=1, H=16, W=16)\nSample y: 1  (0=disordered, 1=ordered)\n\n\n\nfig, axes = plt.subplots(2, 6, figsize=(14, 5))\nfor i, ax in enumerate(axes.flat):\n    ax.imshow(dataset[i][0].squeeze().numpy(), cmap='gray', vmin=0, vmax=1)\n    ax.set_title(f\"y={dataset[i][1].item()}\", fontsize=8)\n    ax.axis('off')\nplt.suptitle(\"Ising spin configurations (16×16)\")\nplt.tight_layout()\nplt.show()"
+  },
+  {
+    "objectID": "notebooks/MLPC/week05_cnn_ising_light.html#trainval-split",
+    "href": "notebooks/MLPC/week05_cnn_ising_light.html#trainval-split",
+    "title": "MLPC Week 5: Convolutional Neural Network (Light)",
+    "section": "2. Train/Val Split",
+    "text": "2. Train/Val Split\n\nn_train = int(0.8 * len(dataset))\nn_val = len(dataset) - n_train\ntrain_ds, val_ds = random_split(dataset, [n_train, n_val])\n\ntrain_loader = DataLoader(train_ds, batch_size=64, shuffle=True)\nval_loader   = DataLoader(val_ds,   batch_size=64, shuffle=False)\nprint(f\"Train: {n_train} | Val: {n_val}\")\n\nTrain: 4000 | Val: 1000"
+  },
+  {
+    "objectID": "notebooks/MLPC/week05_cnn_ising_light.html#define-models",
+    "href": "notebooks/MLPC/week05_cnn_ising_light.html#define-models",
+    "title": "MLPC Week 5: Convolutional Neural Network (Light)",
+    "section": "3. Define Models",
+    "text": "3. Define Models\n\nLinear Baseline\n\nlinear_model = nn.Sequential(\n    nn.Flatten(),\n    nn.Linear(256, 2)\n)\nn_linear = sum(p.numel() for p in linear_model.parameters())\nprint(f\"Linear model parameters: {n_linear:,}\")\n\nLinear model parameters: 514\n\n\n\n\nSmallCNN\n\nclass SmallCNN(nn.Module):\n    def __init__(self):\n        super().__init__()\n        self.conv = nn.Sequential(\n            nn.Conv2d(1, 8, kernel_size=3, padding=1),  # output: (8, 16, 16)\n            nn.ReLU(),\n            nn.MaxPool2d(2),                              # output: (8,  8,  8)\n        )\n        self.fc = nn.Sequential(\n            nn.Flatten(),\n            nn.Linear(8 * 8 * 8, 2)\n        )\n\n    def forward(self, x):\n        return self.fc(self.conv(x))\n\ncnn_model = SmallCNN()\nn_cnn = sum(p.numel() for p in cnn_model.parameters())\nprint(f\"SmallCNN parameters: {n_cnn:,}\")\n\n# Trace dimensions\nx_test = torch.randn(1, 1, 16, 16)\nfeat = cnn_model.conv(x_test)\nprint(f\"\\nFeature map after conv+pool: {feat.shape}  (B, C, H, W)\")\n\nSmallCNN parameters: 1,106\n\nFeature map after conv+pool: torch.Size([1, 8, 8, 8])  (B, C, H, W)"
+  },
+  {
+    "objectID": "notebooks/MLPC/week05_cnn_ising_light.html#training-loop",
+    "href": "notebooks/MLPC/week05_cnn_ising_light.html#training-loop",
+    "title": "MLPC Week 5: Convolutional Neural Network (Light)",
+    "section": "4. Training Loop",
+    "text": "4. Training Loop\n\ndef train_and_eval(model, train_loader, val_loader, n_train, n_val, epochs=50, lr=1e-3):\n    criterion = nn.CrossEntropyLoss()\n    optimizer = torch.optim.Adam(model.parameters(), lr=lr)\n    train_accs, val_accs = [], []\n\n    for epoch in range(epochs):\n        model.train()\n        ep_acc = 0.0\n        for x_batch, y_batch in train_loader:\n            optimizer.zero_grad()\n            logits = model(x_batch)\n            loss = criterion(logits, y_batch)\n            loss.backward()\n            optimizer.step()\n            ep_acc += (logits.argmax(1) == y_batch).float().sum().item()\n        train_accs.append(ep_acc / n_train)\n\n        model.eval()\n        v_acc = 0.0\n        with torch.no_grad():\n            for x_batch, y_batch in val_loader:\n                logits = model(x_batch)\n                v_acc += (logits.argmax(1) == y_batch).float().sum().item()\n        val_accs.append(v_acc / n_val)\n\n    return train_accs, val_accs\n\ntorch.manual_seed(0)\nlin_train, lin_val = train_and_eval(linear_model, train_loader, val_loader, n_train, n_val)\ntorch.manual_seed(0)\ncnn_train, cnn_val = train_and_eval(cnn_model,    train_loader, val_loader, n_train, n_val)\n\nprint(f\"Linear model — final val accuracy: {lin_val[-1]:.3f}\")\nprint(f\"SmallCNN     — final val accuracy: {cnn_val[-1]:.3f}\")\n\nLinear model — final val accuracy: 0.542\nSmallCNN     — final val accuracy: 0.963"
+  },
+  {
+    "objectID": "notebooks/MLPC/week05_cnn_ising_light.html#evaluation",
+    "href": "notebooks/MLPC/week05_cnn_ising_light.html#evaluation",
+    "title": "MLPC Week 5: Convolutional Neural Network (Light)",
+    "section": "5. Evaluation",
+    "text": "5. Evaluation\n\nplt.figure(figsize=(8, 4))\nplt.plot(lin_val, '--', label=f'Linear baseline (val) — {n_linear} params')\nplt.plot(cnn_val, '-',  label=f'SmallCNN (val)       — {n_cnn} params')\nplt.xlabel(\"Epoch\"); plt.ylabel(\"Val Accuracy\")\nplt.title(\"CNN vs. Linear Baseline on Ising (light)\")\nplt.legend(); plt.tight_layout(); plt.show()\n\n\n\n\n\n\n\n\n\n# Visualize the 8 learned conv filters\nfilters = cnn_model.conv[0].weight.data.squeeze(1).numpy()  # (8, 3, 3)\n\nfig, axes = plt.subplots(1, 8, figsize=(14, 2))\nfor i, ax in enumerate(axes):\n    vmax = np.abs(filters[i]).max()\n    ax.imshow(filters[i], cmap='RdBu_r', vmin=-vmax, vmax=vmax)\n    ax.set_title(f\"Filter {i}\", fontsize=8)\n    ax.axis('off')\nplt.suptitle(\"Learned 3×3 convolutional filters\")\nplt.tight_layout()\nplt.show()"
+  },
+  {
+    "objectID": "notebooks/MLPC/week05_cnn_ising_light.html#exercises",
+    "href": "notebooks/MLPC/week05_cnn_ising_light.html#exercises",
+    "title": "MLPC Week 5: Convolutional Neural Network (Light)",
+    "section": "Exercises",
+    "text": "Exercises\n\nRemove nn.MaxPool2d(2) from the SmallCNN. What happens to the number of parameters and the feature map size entering the FC layer?\nTry kernel_size=5 with padding=2. How does the feature map size change after conv? Does accuracy improve?\nApply the trained conv filters manually: feat = cnn_model.conv(dataset[0][0].unsqueeze(0)). Plot the 8 feature maps. What spatial structures does each filter detect?"
+  },
+  {
+    "objectID": "notebooks/MFML/week03_regression_tensile.html",
+    "href": "notebooks/MFML/week03_regression_tensile.html",
+    "title": "MFML Week 3: Regression from Scratch",
+    "section": "",
+    "text": "Open In Colab"
+  },
+  {
+    "objectID": "notebooks/MFML/week03_regression_tensile.html#learning-objectives",
+    "href": "notebooks/MFML/week03_regression_tensile.html#learning-objectives",
+    "title": "MFML Week 3: Regression from Scratch",
+    "section": "Learning Objectives",
+    "text": "Learning Objectives\n\nInstantiate a torch.utils.data.Dataset and DataLoader\nDefine a linear model as nn.Module\nImplement a manual training loop (MSE loss, SGD optimizer)"
+  },
+  {
+    "objectID": "notebooks/MFML/week03_regression_tensile.html#setup",
+    "href": "notebooks/MFML/week03_regression_tensile.html#setup",
+    "title": "MFML Week 3: Regression from Scratch",
+    "section": "Setup",
+    "text": "Setup\n\n!pip install git+https://github.com/ECLIPSE-Lab/Ai4MatLectures.git \"mdsdata&gt;=0.1.5\"\n\n\nimport torch\nimport torch.nn as nn\nfrom torch.utils.data import DataLoader, random_split\nfrom ai4mat.datasets import TensileTestDataset\nimport matplotlib.pyplot as plt"
+  },
+  {
+    "objectID": "notebooks/MFML/week03_regression_tensile.html#load-the-data",
+    "href": "notebooks/MFML/week03_regression_tensile.html#load-the-data",
+    "title": "MFML Week 3: Regression from Scratch",
+    "section": "1. Load the Data",
+    "text": "1. Load the Data\n\ndataset = TensileTestDataset(temperature=600)\nprint(f\"Dataset size: {len(dataset)}\")\nx0, y0 = dataset[0]\nprint(f\"Sample x (strain): {x0}, shape: {x0.shape}\")\nprint(f\"Sample y (stress): {y0:.2f} MPa\")\n\nDataset size: 350\nSample x (strain): tensor([0.0001]), shape: torch.Size([1])\nSample y (stress): -0.13 MPa\n\n\n\nX_all = torch.stack([dataset[i][0] for i in range(len(dataset))]).squeeze()\ny_all = torch.stack([dataset[i][1] for i in range(len(dataset))])\n\nplt.scatter(X_all.numpy(), y_all.numpy(), s=8, alpha=0.5)\nplt.xlabel(\"Strain\")\nplt.ylabel(\"Stress (MPa)\")\nplt.title(\"Tensile Test Data (600°C)\")\nplt.tight_layout()\nplt.show()"
+  },
+  {
+    "objectID": "notebooks/MFML/week03_regression_tensile.html#trainval-split",
+    "href": "notebooks/MFML/week03_regression_tensile.html#trainval-split",
+    "title": "MFML Week 3: Regression from Scratch",
+    "section": "2. Train/Val Split",
+    "text": "2. Train/Val Split\n\nn_train = int(0.8 * len(dataset))\nn_val = len(dataset) - n_train\ntrain_ds, val_ds = random_split(dataset, [n_train, n_val])\n\ntrain_loader = DataLoader(train_ds, batch_size=32, shuffle=True)\nval_loader   = DataLoader(val_ds,   batch_size=32, shuffle=False)\nprint(f\"Train: {n_train} | Val: {n_val}\")\n\nTrain: 280 | Val: 70"
+  },
+  {
+    "objectID": "notebooks/MFML/week03_regression_tensile.html#define-the-model",
+    "href": "notebooks/MFML/week03_regression_tensile.html#define-the-model",
+    "title": "MFML Week 3: Regression from Scratch",
+    "section": "3. Define the Model",
+    "text": "3. Define the Model\n\nclass LinearModel(nn.Module):\n    def __init__(self):\n        super().__init__()\n        self.linear = nn.Linear(1, 1)\n\n    def forward(self, x):\n        return self.linear(x).squeeze(-1)\n\nmodel = LinearModel()\nprint(model)\nprint(f\"Parameters: {sum(p.numel() for p in model.parameters())}\")\n\nLinearModel(\n  (linear): Linear(in_features=1, out_features=1, bias=True)\n)\nParameters: 2"
+  },
+  {
+    "objectID": "notebooks/MFML/week03_regression_tensile.html#training-loop",
+    "href": "notebooks/MFML/week03_regression_tensile.html#training-loop",
+    "title": "MFML Week 3: Regression from Scratch",
+    "section": "4. Training Loop",
+    "text": "4. Training Loop\n\ncriterion = nn.MSELoss()\noptimizer = torch.optim.SGD(model.parameters(), lr=1e-4)\n\ntrain_losses, val_losses = [], []\n\nfor epoch in range(100):\n    model.train()\n    epoch_loss = 0.0\n    for x_batch, y_batch in train_loader:\n        optimizer.zero_grad()\n        y_pred = model(x_batch)\n        loss = criterion(y_pred, y_batch)\n        loss.backward()\n        optimizer.step()\n        epoch_loss += loss.item() * len(x_batch)\n    train_losses.append(epoch_loss / n_train)\n\n    model.eval()\n    val_loss = 0.0\n    with torch.no_grad():\n        for x_batch, y_batch in val_loader:\n            y_pred = model(x_batch)\n            val_loss += criterion(y_pred, y_batch).item() * len(x_batch)\n    val_losses.append(val_loss / n_val)\n\nplt.plot(train_losses, label='Train MSE')\nplt.plot(val_losses, label='Val MSE')\nplt.xlabel(\"Epoch\")\nplt.ylabel(\"MSE Loss\")\nplt.legend()\nplt.title(\"Training Curve\")\nplt.tight_layout()\nplt.show()"
+  },
+  {
+    "objectID": "notebooks/MFML/week03_regression_tensile.html#evaluation",
+    "href": "notebooks/MFML/week03_regression_tensile.html#evaluation",
+    "title": "MFML Week 3: Regression from Scratch",
+    "section": "5. Evaluation",
+    "text": "5. Evaluation\n\nmodel.eval()\nwith torch.no_grad():\n    X_tensor = torch.stack([dataset[i][0] for i in range(len(dataset))])\n    y_pred_all = model(X_tensor).numpy()\n\norder = X_all.numpy().argsort()\nplt.scatter(X_all.numpy(), y_all.numpy(), s=8, alpha=0.3, label='Data')\nplt.plot(X_all.numpy()[order], y_pred_all[order], color='red', label='Linear fit')\nplt.xlabel(\"Strain\")\nplt.ylabel(\"Stress (MPa)\")\nplt.legend()\nplt.title(\"Linear Model Fit\")\nplt.tight_layout()\nplt.show()"
+  },
+  {
+    "objectID": "notebooks/MFML/week03_regression_tensile.html#exercises",
+    "href": "notebooks/MFML/week03_regression_tensile.html#exercises",
+    "title": "MFML Week 3: Regression from Scratch",
+    "section": "Exercises",
+    "text": "Exercises\n\nChange temperature to 0 or 400 in TensileTestDataset. How does the curve shape change? Does linear regression still work well?\nReplace LinearModel with a 2-layer MLP: nn.Sequential(nn.Linear(1,16), nn.ReLU(), nn.Linear(16,1)). Does the fit improve?\nIncrease the learning rate to 1e-3. What happens to training? What does this tell you about loss landscape conditioning?"
+  },
+  {
+    "objectID": "notebooks/MFML/week11_clustering_nanoindentation.html",
+    "href": "notebooks/MFML/week11_clustering_nanoindentation.html",
+    "title": "MFML Week 11: Unsupervised Clustering",
+    "section": "",
+    "text": "Open In Colab"
+  },
+  {
+    "objectID": "notebooks/MFML/week11_clustering_nanoindentation.html#learning-objectives",
+    "href": "notebooks/MFML/week11_clustering_nanoindentation.html#learning-objectives",
+    "title": "MFML Week 11: Unsupervised Clustering",
+    "section": "Learning Objectives",
+    "text": "Learning Objectives\n\nDistinguish unsupervised from supervised learning\nApply K-means clustering to materials property data\nEvaluate cluster quality by comparing to ground-truth labels"
+  },
+  {
+    "objectID": "notebooks/MFML/week11_clustering_nanoindentation.html#setup",
+    "href": "notebooks/MFML/week11_clustering_nanoindentation.html#setup",
+    "title": "MFML Week 11: Unsupervised Clustering",
+    "section": "Setup",
+    "text": "Setup\n\n!pip install git+https://github.com/ECLIPSE-Lab/Ai4MatLectures.git \"mdsdata&gt;=0.1.5\"\n\n\nimport torch\nimport numpy as np\nimport matplotlib.pyplot as plt\nfrom sklearn.cluster import KMeans\nfrom ai4mat.datasets import NanoindentationDataset"
+  },
+  {
+    "objectID": "notebooks/MFML/week11_clustering_nanoindentation.html#load-the-data",
+    "href": "notebooks/MFML/week11_clustering_nanoindentation.html#load-the-data",
+    "title": "MFML Week 11: Unsupervised Clustering",
+    "section": "1. Load the Data",
+    "text": "1. Load the Data\n\ndataset = NanoindentationDataset()\nprint(f\"Dataset size: {len(dataset)}\")\nx0, y0 = dataset[0]\nprint(f\"Sample x shape: {x0.shape} — features: [E (GPa), H (GPa)]\")\nprint(f\"Sample y: {y0} (material class)\")\n\nX = torch.stack([dataset[i][0] for i in range(len(dataset))]).numpy()\ny = torch.tensor([dataset[i][1] for i in range(len(dataset))]).numpy()\n\nprint(f\"\\nX shape: {X.shape}\")\nprint(f\"Classes: {np.unique(y).tolist()}\")\nprint(f\"Class counts: {dict(zip(*np.unique(y, return_counts=True)))}\")\n\nDataset size: 938\nSample x shape: torch.Size([2]) — features: [E (GPa), H (GPa)]\nSample y: 0 (material class)\n\nX shape: (938, 2)\nClasses: [0, 1, 2, 3]\nClass counts: {0: 30, 1: 513, 2: 364, 3: 31}"
+  },
+  {
+    "objectID": "notebooks/MFML/week11_clustering_nanoindentation.html#visualize-raw-data-no-labels",
+    "href": "notebooks/MFML/week11_clustering_nanoindentation.html#visualize-raw-data-no-labels",
+    "title": "MFML Week 11: Unsupervised Clustering",
+    "section": "2. Visualize Raw Data (No Labels)",
+    "text": "2. Visualize Raw Data (No Labels)\nIn an unsupervised setting, we only see the features — no class information.\n\nplt.figure(figsize=(7, 5))\nplt.scatter(X[:, 0], X[:, 1], alpha=0.5, s=20, color='gray')\nplt.xlabel(\"Young's modulus E (GPa)\")\nplt.ylabel(\"Hardness H (GPa)\")\nplt.title(\"Nanoindentation data — no labels shown\")\nplt.tight_layout()\nplt.show()"
+  },
+  {
+    "objectID": "notebooks/MFML/week11_clustering_nanoindentation.html#k-means-clustering-k4",
+    "href": "notebooks/MFML/week11_clustering_nanoindentation.html#k-means-clustering-k4",
+    "title": "MFML Week 11: Unsupervised Clustering",
+    "section": "3. K-Means Clustering (k=4)",
+    "text": "3. K-Means Clustering (k=4)\n\nkmeans = KMeans(n_clusters=4, random_state=42, n_init=10)\ncluster_labels = kmeans.fit_predict(X)\nprint(f\"Cluster sizes: {dict(zip(*np.unique(cluster_labels, return_counts=True)))}\")\nprint(f\"Inertia (sum of squared distances to centroids): {kmeans.inertia_:.2f}\")\n\nCluster sizes: {0: 444, 1: 163, 2: 139, 3: 192}\nInertia (sum of squared distances to centroids): 373641.22\n\n\n\ncolors = ['tab:blue', 'tab:orange', 'tab:green', 'tab:red']\n\nfig, axes = plt.subplots(1, 2, figsize=(14, 5))\n\n# K-means clusters\nfor k in range(4):\n    mask = cluster_labels == k\n    axes[0].scatter(X[mask, 0], X[mask, 1], alpha=0.5, s=20,\n                    color=colors[k], label=f\"Cluster {k}\")\naxes[0].scatter(kmeans.cluster_centers_[:, 0], kmeans.cluster_centers_[:, 1],\n                marker='X', s=200, color='black', zorder=5, label='Centroids')\naxes[0].set_xlabel(\"E (GPa)\"); axes[0].set_ylabel(\"H (GPa)\")\naxes[0].set_title(\"K-Means Clusters (k=4)\"); axes[0].legend()\n\n# Ground truth labels\nclass_names = [\"Class 0\", \"Class 1\", \"Class 2\", \"Class 3\"]\nfor cls in range(4):\n    mask = y == cls\n    axes[1].scatter(X[mask, 0], X[mask, 1], alpha=0.5, s=20,\n                    color=colors[cls], label=class_names[cls])\naxes[1].set_xlabel(\"E (GPa)\"); axes[1].set_ylabel(\"H (GPa)\")\naxes[1].set_title(\"Ground Truth Labels\"); axes[1].legend()\n\nplt.tight_layout()\nplt.show()"
+  },
+  {
+    "objectID": "notebooks/MFML/week11_clustering_nanoindentation.html#evaluate-clustering-accuracy",
+    "href": "notebooks/MFML/week11_clustering_nanoindentation.html#evaluate-clustering-accuracy",
+    "title": "MFML Week 11: Unsupervised Clustering",
+    "section": "4. Evaluate Clustering Accuracy",
+    "text": "4. Evaluate Clustering Accuracy\nSince K-means does not know which cluster index corresponds to which class, we need to find the best assignment (Hungarian-style best-match counting).\n\ndef best_match_accuracy(true_labels, cluster_labels, n_clusters=4):\n    \"\"\"Greedily match each cluster to the true class it most overlaps with.\"\"\"\n    n_classes = len(np.unique(true_labels))\n    # Count matrix: rows = clusters, cols = true classes\n    count = np.zeros((n_clusters, n_classes), dtype=int)\n    for c, t in zip(cluster_labels, true_labels):\n        count[c, t] += 1\n\n    # Greedy assignment (good enough for 4 clusters)\n    assignment = {}\n    count_copy = count.copy()\n    for _ in range(min(n_clusters, n_classes)):\n        best = np.unravel_index(count_copy.argmax(), count_copy.shape)\n        assignment[best[0]] = best[1]\n        count_copy[best[0], :] = -1\n        count_copy[:, best[1]] = -1\n\n    mapped = np.array([assignment.get(c, -1) for c in cluster_labels])\n    acc = (mapped == true_labels).mean()\n    return acc, assignment\n\nacc, assignment = best_match_accuracy(y, cluster_labels)\nprint(f\"Cluster-to-class assignment: {assignment}\")\nprint(f\"Best-match clustering accuracy: {acc:.3f}\")\n\nCluster-to-class assignment: {0: 1, 3: 2, 1: 3, 2: 0}\nBest-match clustering accuracy: 0.498\n\n\n\n# Confusion: cluster vs. true label\nfrom collections import Counter\nprint(\"\\nPer-cluster breakdown (cluster → true class counts):\")\nfor k in range(4):\n    mask = cluster_labels == k\n    counts = Counter(y[mask].tolist())\n    print(f\"  Cluster {k}: {dict(sorted(counts.items()))}\")\n\n\nPer-cluster breakdown (cluster → true class counts):\n  Cluster 0: {0: 30, 1: 325, 2: 89}\n  Cluster 1: {1: 41, 2: 91, 3: 31}\n  Cluster 2: {1: 66, 2: 73}\n  Cluster 3: {1: 81, 2: 111}"
+  },
+  {
+    "objectID": "notebooks/MFML/week11_clustering_nanoindentation.html#exercises",
+    "href": "notebooks/MFML/week11_clustering_nanoindentation.html#exercises",
+    "title": "MFML Week 11: Unsupervised Clustering",
+    "section": "Exercises",
+    "text": "Exercises\n\nTry n_clusters=2 or n_clusters=6 in KMeans. How does inertia change, and do the clusters still make physical sense?\nNormalize the features before running K-means: X_norm = (X - X.mean(0)) / X.std(0). Does clustering accuracy improve? Why might unnormalized features bias the result?\nWhat happens if you add a third (artificial) feature: X_noise = np.hstack([X, np.random.randn(len(X), 1)]). Does K-means still find the right clusters?"
+  },
+  {
+    "objectID": "notebooks/MFML/week10_autoencoder_ising_full.html",
+    "href": "notebooks/MFML/week10_autoencoder_ising_full.html",
+    "title": "MFML Week 10: Convolutional Autoencoder",
+    "section": "",
+    "text": "Open In Colab"
+  },
+  {
+    "objectID": "notebooks/MFML/week10_autoencoder_ising_full.html#learning-objectives",
+    "href": "notebooks/MFML/week10_autoencoder_ising_full.html#learning-objectives",
+    "title": "MFML Week 10: Convolutional Autoencoder",
+    "section": "Learning Objectives",
+    "text": "Learning Objectives\n\nBuild an encoder-decoder architecture with convolutional layers\nTrain with pixel-wise reconstruction loss (MSE)\nVisualize the 2D latent space and connect its structure to physical labels"
+  },
+  {
+    "objectID": "notebooks/MFML/week10_autoencoder_ising_full.html#setup",
+    "href": "notebooks/MFML/week10_autoencoder_ising_full.html#setup",
+    "title": "MFML Week 10: Convolutional Autoencoder",
+    "section": "Setup",
+    "text": "Setup\n\n!pip install git+https://github.com/ECLIPSE-Lab/Ai4MatLectures.git \"mdsdata&gt;=0.1.5\"\n\n\nimport torch\nimport torch.nn as nn\nfrom torch.utils.data import DataLoader, random_split\nfrom ai4mat.datasets import IsingDataset\nimport matplotlib.pyplot as plt\nimport numpy as np"
+  },
+  {
+    "objectID": "notebooks/MFML/week10_autoencoder_ising_full.html#load-the-data",
+    "href": "notebooks/MFML/week10_autoencoder_ising_full.html#load-the-data",
+    "title": "MFML Week 10: Convolutional Autoencoder",
+    "section": "1. Load the Data",
+    "text": "1. Load the Data\n\ndataset = IsingDataset(size='full')\nprint(f\"Dataset size: {len(dataset)}\")\nx0, y0 = dataset[0]\nprint(f\"Sample x shape: {x0.shape}, dtype: {x0.dtype}\")\nprint(f\"Sample y: {y0} (0=disordered T&gt;Tc, 1=ordered T&lt;Tc)\")\n\nDataset size: 5000\nSample x shape: torch.Size([1, 64, 64]), dtype: torch.float32\nSample y: 0 (0=disordered T&gt;Tc, 1=ordered T&lt;Tc)\n\n\n\nfig, axes = plt.subplots(2, 5, figsize=(14, 6))\nfor i, ax in enumerate(axes.flat):\n    img = dataset[i * 500][0].squeeze().numpy()\n    label = dataset[i * 500][1].item()\n    ax.imshow(img, cmap='gray', vmin=0, vmax=1)\n    ax.set_title(f\"{'Ordered' if label==1 else 'Disordered'}\", fontsize=8)\n    ax.axis('off')\nplt.suptitle(\"Ising spin configurations (64×64)\")\nplt.tight_layout()\nplt.show()"
+  },
+  {
+    "objectID": "notebooks/MFML/week10_autoencoder_ising_full.html#trainval-split",
+    "href": "notebooks/MFML/week10_autoencoder_ising_full.html#trainval-split",
+    "title": "MFML Week 10: Convolutional Autoencoder",
+    "section": "2. Train/Val Split",
+    "text": "2. Train/Val Split\n\nn_train = int(0.8 * len(dataset))\nn_val = len(dataset) - n_train\ntrain_ds, val_ds = random_split(dataset, [n_train, n_val])\n\ntrain_loader = DataLoader(train_ds, batch_size=64, shuffle=True)\nval_loader   = DataLoader(val_ds,   batch_size=64, shuffle=False)\nprint(f\"Train: {n_train} | Val: {n_val}\")\n\nTrain: 4000 | Val: 1000"
+  },
+  {
+    "objectID": "notebooks/MFML/week10_autoencoder_ising_full.html#define-the-autoencoder",
+    "href": "notebooks/MFML/week10_autoencoder_ising_full.html#define-the-autoencoder",
+    "title": "MFML Week 10: Convolutional Autoencoder",
+    "section": "3. Define the Autoencoder",
+    "text": "3. Define the Autoencoder\n\nclass ConvAutoencoder(nn.Module):\n    def __init__(self, latent_dim=2):\n        super().__init__()\n        self.encoder = nn.Sequential(\n            nn.Conv2d(1, 16, 3, stride=2, padding=1),   # 32x32\n            nn.ReLU(),\n            nn.Conv2d(16, 32, 3, stride=2, padding=1),  # 16x16\n            nn.ReLU(),\n            nn.Flatten(),\n            nn.Linear(32 * 16 * 16, latent_dim)\n        )\n        self.decoder = nn.Sequential(\n            nn.Linear(latent_dim, 32 * 16 * 16),\n            nn.ReLU(),\n            nn.Unflatten(1, (32, 16, 16)),\n            nn.ConvTranspose2d(32, 16, 3, stride=2, padding=1, output_padding=1),  # 32x32\n            nn.ReLU(),\n            nn.ConvTranspose2d(16, 1, 3, stride=2, padding=1, output_padding=1),   # 64x64\n            nn.Sigmoid()\n        )\n\n    def forward(self, x):\n        z = self.encoder(x)\n        return self.decoder(z), z\n\nmodel = ConvAutoencoder(latent_dim=2)\nn_params = sum(p.numel() for p in model.parameters())\nprint(f\"Autoencoder parameters: {n_params:,}\")\n\n# Test forward pass\nx_test = torch.randn(4, 1, 64, 64)\nx_recon, z = model(x_test)\nprint(f\"Input shape:       {x_test.shape}\")\nprint(f\"Latent code shape: {z.shape}\")\nprint(f\"Output shape:      {x_recon.shape}\")\n\nAutoencoder parameters: 50,531\nInput shape:       torch.Size([4, 1, 64, 64])\nLatent code shape: torch.Size([4, 2])\nOutput shape:      torch.Size([4, 1, 64, 64])"
+  },
+  {
+    "objectID": "notebooks/MFML/week10_autoencoder_ising_full.html#training-loop",
+    "href": "notebooks/MFML/week10_autoencoder_ising_full.html#training-loop",
+    "title": "MFML Week 10: Convolutional Autoencoder",
+    "section": "4. Training Loop",
+    "text": "4. Training Loop\n\ncriterion = nn.MSELoss()\noptimizer = torch.optim.Adam(model.parameters(), lr=1e-3)\n\ntrain_losses, val_losses = [], []\n\nfor epoch in range(20):\n    model.train()\n    ep_loss = 0.0\n    for x_batch, _ in train_loader:   # labels not used — unsupervised!\n        optimizer.zero_grad()\n        x_recon, _ = model(x_batch)\n        loss = criterion(x_recon, x_batch)\n        loss.backward()\n        optimizer.step()\n        ep_loss += loss.item() * len(x_batch)\n    train_losses.append(ep_loss / n_train)\n\n    model.eval()\n    v_loss = 0.0\n    with torch.no_grad():\n        for x_batch, _ in val_loader:\n            x_recon, _ = model(x_batch)\n            v_loss += criterion(x_recon, x_batch).item() * len(x_batch)\n    val_losses.append(v_loss / n_val)\n\n    if (epoch + 1) % 5 == 0:\n        print(f\"Epoch {epoch+1:3d} | Train MSE: {train_losses[-1]:.4f} | Val MSE: {val_losses[-1]:.4f}\")\n\nplt.plot(train_losses, label='Train MSE')\nplt.plot(val_losses,   label='Val MSE')\nplt.xlabel(\"Epoch\"); plt.ylabel(\"Reconstruction MSE\")\nplt.title(\"Autoencoder Training Curve\"); plt.legend()\nplt.tight_layout(); plt.show()\n\nEpoch   5 | Train MSE: 0.2360 | Val MSE: 0.2366\nEpoch  10 | Train MSE: 0.2342 | Val MSE: 0.2355\nEpoch  15 | Train MSE: 0.2338 | Val MSE: 0.2354\nEpoch  20 | Train MSE: 0.2335 | Val MSE: 0.2356"
+  },
+  {
+    "objectID": "notebooks/MFML/week10_autoencoder_ising_full.html#evaluation",
+    "href": "notebooks/MFML/week10_autoencoder_ising_full.html#evaluation",
+    "title": "MFML Week 10: Convolutional Autoencoder",
+    "section": "5. Evaluation",
+    "text": "5. Evaluation\n\nOriginal vs. Reconstructed Images\n\nmodel.eval()\nx_show = torch.stack([val_ds[i][0] for i in range(8)])\nwith torch.no_grad():\n    x_recon, _ = model(x_show)\n\nfig, axes = plt.subplots(2, 8, figsize=(16, 4))\nfor i in range(8):\n    axes[0, i].imshow(x_show[i].squeeze().numpy(), cmap='gray', vmin=0, vmax=1)\n    axes[0, i].axis('off')\n    axes[1, i].imshow(x_recon[i].squeeze().numpy(), cmap='gray', vmin=0, vmax=1)\n    axes[1, i].axis('off')\naxes[0, 0].set_ylabel(\"Original\", fontsize=10)\naxes[1, 0].set_ylabel(\"Reconstructed\", fontsize=10)\nplt.suptitle(\"Original vs. Reconstructed Ising Configurations\")\nplt.tight_layout()\nplt.show()\n\n\n\n\n\n\n\n\n\n\nLatent Space Visualization\n\n# Encode all validation samples\nall_z, all_labels = [], []\nmodel.eval()\nwith torch.no_grad():\n    for x_batch, y_batch in val_loader:\n        _, z = model(x_batch)\n        all_z.append(z.numpy())\n        all_labels.append(y_batch.numpy())\n\nall_z = np.concatenate(all_z, axis=0)\nall_labels = np.concatenate(all_labels, axis=0)\n\nplt.figure(figsize=(7, 6))\nfor cls, name, color in [(0, \"Disordered (T&gt;Tc)\", \"tab:blue\"),\n                          (1, \"Ordered (T&lt;Tc)\", \"tab:red\")]:\n    mask = all_labels == cls\n    plt.scatter(all_z[mask, 0], all_z[mask, 1], alpha=0.4, s=10, label=name, color=color)\n\nplt.xlabel(\"Latent dim 1\")\nplt.ylabel(\"Latent dim 2\")\nplt.title(\"2D Latent Space — colored by Ising phase\")\nplt.legend()\nplt.tight_layout()\nplt.show()\n\nprint(\"Notice how the two phases separate in latent space — the autoencoder\")\nprint(\"has discovered a representation correlated with the order parameter!\")\n\n\n\n\n\n\n\n\nNotice how the two phases separate in latent space — the autoencoder\nhas discovered a representation correlated with the order parameter!"
+  },
+  {
+    "objectID": "notebooks/MFML/week10_autoencoder_ising_full.html#exercises",
+    "href": "notebooks/MFML/week10_autoencoder_ising_full.html#exercises",
+    "title": "MFML Week 10: Convolutional Autoencoder",
+    "section": "Exercises",
+    "text": "Exercises\n\nTry latent_dim=8. Does reconstruction quality improve? To visualize the 8D space, project to 2D with PCA (from sklearn.decomposition import PCA). Do the phases still separate?\nWhat happens if you feed random Gaussian noise to the decoder? Sample z = torch.randn(16, 2) and plot model.decoder(z). Are the outputs physically meaningful?\nCompare the latent space structure to the Ising phase diagram. Can you identify the Curie temperature Tc as a boundary in latent space?"
+  },
+  {
+    "objectID": "index.html",
+    "href": "index.html",
+    "title": "Ai4MatLectures",
+    "section": "",
+    "text": "Teaching notebooks for the ECLIPSE Lab lecture triad at FAU Erlangen-Nürnberg. Install the package:"
+  },
+  {
+    "objectID": "index.html#mfml-mathematical-foundations-of-ai-ml",
+    "href": "index.html#mfml-mathematical-foundations-of-ai-ml",
+    "title": "Ai4MatLectures",
+    "section": "MFML — Mathematical Foundations of AI & ML",
+    "text": "MFML — Mathematical Foundations of AI & ML\n\n\n\nWeek\nTopic\nDataset\nNotebook\n\n\n\n\n3\nRegression from scratch\nTensile Test\nweek03_regression_tensile\n\n\n4\nFirst nn.Module classifier\nIris\nweek04_classifier_iris\n\n\n5\nManual backprop\nAlpaydin Digits\nweek05_backprop_digits\n\n\n7\nOverfitting & regularization\nIsing light\nweek07_overfitting_ising_light\n\n\n10\nAutoencoder latent space\nIsing full\nweek10_autoencoder_ising_full\n\n\n11\nUnsupervised clustering\nNanoindentation\nweek11_clustering_nanoindentation"
+  },
+  {
+    "objectID": "index.html#mlpc-ml-in-materials-processing-characterization",
+    "href": "index.html#mlpc-ml-in-materials-processing-characterization",
+    "title": "Ai4MatLectures",
+    "section": "MLPC — ML in Materials Processing & Characterization",
+    "text": "MLPC — ML in Materials Processing & Characterization\n\n\n\nWeek\nTopic\nDataset\nNotebook\n\n\n\n\n4\nBaseline before CNNs\nAlpaydin Digits\nweek04_baseline_digits\n\n\n5\nFirst CNN\nIsing light\nweek05_cnn_ising_light\n\n\n5\nFull CNN training\nIsing full\nweek05_cnn_ising_full\n\n\n7\nProcess monitoring\nTensile Test\nweek07_process_monitoring_tensile\n\n\n11\nAnomaly detection via AE\nCahn-Hilliard\nweek11_anomaly_cahn_hilliard"
+  },
+  {
+    "objectID": "index.html#mg-materials-genomics",
+    "href": "index.html#mg-materials-genomics",
+    "title": "Ai4MatLectures",
+    "section": "MG — Materials Genomics",
+    "text": "MG — Materials Genomics\n\n\n\nWeek\nTopic\nDataset\nNotebook\n\n\n\n\n5\nDescriptors + regression\nChemical Elements\nweek05_descriptors_elements\n\n\n8\nRegression & generalization\nNanoindentation\nweek08_regression_nanoindentation\n\n\n11\nLatent space (Ising)\nIsing light\nweek11_latent_ising\n\n\n11\nMaterials latent space\nCahn-Hilliard\nweek11_latent_cahn_hilliard"
+  },
+  {
+    "objectID": "notebooks/MFML/week05_backprop_digits.html",
+    "href": "notebooks/MFML/week05_backprop_digits.html",
+    "title": "MFML Week 5: Manual Backprop",
+    "section": "",
+    "text": "Open In Colab"
+  },
+  {
+    "objectID": "notebooks/MFML/week05_backprop_digits.html#learning-objectives",
+    "href": "notebooks/MFML/week05_backprop_digits.html#learning-objectives",
+    "title": "MFML Week 5: Manual Backprop",
+    "section": "Learning Objectives",
+    "text": "Learning Objectives\n\nConnect the chain rule to .grad tensors populated by .backward()\nImplement manual gradient computation for a single linear layer\nVerify that manual gradients match PyTorch autograd results"
+  },
+  {
+    "objectID": "notebooks/MFML/week05_backprop_digits.html#setup",
+    "href": "notebooks/MFML/week05_backprop_digits.html#setup",
+    "title": "MFML Week 5: Manual Backprop",
+    "section": "Setup",
+    "text": "Setup\n\n!pip install git+https://github.com/ECLIPSE-Lab/Ai4MatLectures.git \"mdsdata&gt;=0.1.5\"\n\n\nimport torch\nimport torch.nn as nn\nfrom torch.utils.data import DataLoader, random_split\nfrom ai4mat.datasets import DigitsDataset\nimport matplotlib.pyplot as plt\nimport numpy as np"
+  },
+  {
+    "objectID": "notebooks/MFML/week05_backprop_digits.html#load-the-data",
+    "href": "notebooks/MFML/week05_backprop_digits.html#load-the-data",
+    "title": "MFML Week 5: Manual Backprop",
+    "section": "1. Load the Data",
+    "text": "1. Load the Data\n\ndataset = DigitsDataset()\nprint(f\"Dataset size: {len(dataset)}\")\nx0, y0 = dataset[0]\nprint(f\"Sample x shape: {x0.shape}, dtype: {x0.dtype}\")\nprint(f\"Sample y: {y0}, dtype: {y0.dtype}\")\n\nn_classes = len(torch.unique(torch.tensor([dataset[i][1] for i in range(len(dataset))])))\nprint(f\"Number of classes: {n_classes}\")\n\nDataset size: 5620\nSample x shape: torch.Size([64]), dtype: torch.float32\nSample y: 0, dtype: torch.int64\nNumber of classes: 10\n\n\n\n# Visualize a few digit images (each sample is a flat 64-dim vector from 8x8 images)\nfig, axes = plt.subplots(2, 8, figsize=(14, 4))\nfor i, ax in enumerate(axes.flat):\n    img = dataset[i][0].reshape(8, 8).numpy()\n    ax.imshow(img, cmap='gray_r', vmin=0, vmax=1)\n    ax.set_title(f\"y={dataset[i][1].item()}\", fontsize=8)\n    ax.axis('off')\nplt.suptitle(\"Sample digit images (8×8 pixels, flattened to 64 features)\")\nplt.tight_layout()\nplt.show()"
+  },
+  {
+    "objectID": "notebooks/MFML/week05_backprop_digits.html#trainval-split",
+    "href": "notebooks/MFML/week05_backprop_digits.html#trainval-split",
+    "title": "MFML Week 5: Manual Backprop",
+    "section": "2. Train/Val Split",
+    "text": "2. Train/Val Split\n\nn_train = int(0.8 * len(dataset))\nn_val = len(dataset) - n_train\ntrain_ds, val_ds = random_split(dataset, [n_train, n_val])\n\ntrain_loader = DataLoader(train_ds, batch_size=64, shuffle=True)\nval_loader   = DataLoader(val_ds,   batch_size=64, shuffle=False)\nprint(f\"Train: {n_train} | Val: {n_val}\")\n\nTrain: 4496 | Val: 1124"
+  },
+  {
+    "objectID": "notebooks/MFML/week05_backprop_digits.html#manual-gradient-verification",
+    "href": "notebooks/MFML/week05_backprop_digits.html#manual-gradient-verification",
+    "title": "MFML Week 5: Manual Backprop",
+    "section": "3. Manual Gradient Verification",
+    "text": "3. Manual Gradient Verification\nBefore training, let’s verify that PyTorch’s autograd produces correct gradients.\nFor a single linear layer y = W x + b followed by MSE loss, the analytical gradient is:\n\ndL/dW = (2/n) * (y_pred - y_true)^T * x (for MSE: L = mean((Wx+b - y)^2))\n\n\n# Toy example: single linear layer, batch of 4 samples\ntorch.manual_seed(42)\nW = torch.randn(3, 4, requires_grad=True)  # output_dim x input_dim\nb = torch.zeros(3, requires_grad=True)\n\nx_toy = torch.randn(4, 4)   # batch_size x input_dim\ny_toy = torch.randn(4, 3)   # batch_size x output_dim (regression target)\n\n# Forward pass\ny_pred = x_toy @ W.T + b    # (4, 3)\nloss = ((y_pred - y_toy) ** 2).mean()\n\n# Autograd backward\nloss.backward()\nautograd_dW = W.grad.clone()\n\n# Manual gradient: dL/dW = (2/n) * (y_pred - y_toy)^T @ x\n# Note: mean over n*output_dim elements\nn_total = y_toy.numel()\nmanual_dW = (2.0 / n_total) * (y_pred.detach() - y_toy).T @ x_toy\n\nprint(\"Autograd dW (first row):\", autograd_dW[0].numpy())\nprint(\"Manual  dW (first row):\", manual_dW[0].numpy())\nprint(f\"\\nMax absolute difference: {(autograd_dW - manual_dW).abs().max().item():.2e}\")\nprint(\"Gradients match!\" if torch.allclose(autograd_dW, manual_dW, atol=1e-5) else \"Mismatch!\")\n\nAutograd dW (first row): [0.35887453 0.18204454 0.82238907 0.02623338]\nManual  dW (first row): [0.35887453 0.18204454 0.82238907 0.02623338]\n\nMax absolute difference: 0.00e+00\nGradients match!\n\n\n\n# Inspect the computation graph\nprint(\"loss.grad_fn:\", loss.grad_fn)\nprint(\"  └─\", loss.grad_fn.next_functions[0][0])\nprint(\"     └─\", loss.grad_fn.next_functions[0][0].next_functions[0][0])\nprint(\"        └─ ... (AddmmBackward0 → MmBackward0 → AccumulateGrad)\")\nprint()\nprint(\"The chain rule flows backward through these nodes,\")\nprint(\"accumulating gradients into W.grad and b.grad.\")\n\nloss.grad_fn: &lt;MeanBackward0 object at 0x7bc9b4340eb0&gt;\n  └─ &lt;PowBackward0 object at 0x7bc9b4341d50&gt;\n     └─ &lt;SubBackward0 object at 0x7bc9b4340eb0&gt;\n        └─ ... (AddmmBackward0 → MmBackward0 → AccumulateGrad)\n\nThe chain rule flows backward through these nodes,\naccumulating gradients into W.grad and b.grad."
+  },
+  {
+    "objectID": "notebooks/MFML/week05_backprop_digits.html#define-the-model",
+    "href": "notebooks/MFML/week05_backprop_digits.html#define-the-model",
+    "title": "MFML Week 5: Manual Backprop",
+    "section": "4. Define the Model",
+    "text": "4. Define the Model\n\nmodel = nn.Sequential(\n    nn.Linear(64, 32),\n    nn.ReLU(),\n    nn.Linear(32, 10)\n)\nprint(model)\nprint(f\"Total parameters: {sum(p.numel() for p in model.parameters())}\")\n\nSequential(\n  (0): Linear(in_features=64, out_features=32, bias=True)\n  (1): ReLU()\n  (2): Linear(in_features=32, out_features=10, bias=True)\n)\nTotal parameters: 2410"
+  },
+  {
+    "objectID": "notebooks/MFML/week05_backprop_digits.html#training-loop",
+    "href": "notebooks/MFML/week05_backprop_digits.html#training-loop",
+    "title": "MFML Week 5: Manual Backprop",
+    "section": "5. Training Loop",
+    "text": "5. Training Loop\n\ncriterion = nn.CrossEntropyLoss()\noptimizer = torch.optim.Adam(model.parameters(), lr=1e-3)\n\ntrain_losses, val_losses = [], []\ntrain_accs, val_accs = [], []\n\ndef accuracy(logits, labels):\n    return (logits.argmax(dim=1) == labels).float().mean().item()\n\nfor epoch in range(30):\n    model.train()\n    ep_loss, ep_acc = 0.0, 0.0\n    for x_batch, y_batch in train_loader:\n        optimizer.zero_grad()\n        logits = model(x_batch)\n        loss = criterion(logits, y_batch)\n        loss.backward()\n        optimizer.step()\n        ep_loss += loss.item() * len(x_batch)\n        ep_acc  += accuracy(logits, y_batch) * len(x_batch)\n    train_losses.append(ep_loss / n_train)\n    train_accs.append(ep_acc / n_train)\n\n    model.eval()\n    v_loss, v_acc = 0.0, 0.0\n    with torch.no_grad():\n        for x_batch, y_batch in val_loader:\n            logits = model(x_batch)\n            v_loss += criterion(logits, y_batch).item() * len(x_batch)\n            v_acc  += accuracy(logits, y_batch) * len(x_batch)\n    val_losses.append(v_loss / n_val)\n    val_accs.append(v_acc / n_val)\n\nfig, axes = plt.subplots(1, 2, figsize=(12, 4))\naxes[0].plot(train_losses, label='Train'); axes[0].plot(val_losses, label='Val')\naxes[0].set_xlabel(\"Epoch\"); axes[0].set_ylabel(\"Loss\"); axes[0].set_title(\"Loss\"); axes[0].legend()\naxes[1].plot(train_accs, label='Train'); axes[1].plot(val_accs, label='Val')\naxes[1].set_xlabel(\"Epoch\"); axes[1].set_ylabel(\"Accuracy\"); axes[1].set_title(\"Accuracy\"); axes[1].legend()\nplt.tight_layout()\nplt.show()\nprint(f\"Final val accuracy: {val_accs[-1]:.3f}\")\n\n\n\n\n\n\n\n\nFinal val accuracy: 0.973"
+  },
+  {
+    "objectID": "notebooks/MFML/week05_backprop_digits.html#inspect-gradients-after-backward",
+    "href": "notebooks/MFML/week05_backprop_digits.html#inspect-gradients-after-backward",
+    "title": "MFML Week 5: Manual Backprop",
+    "section": "6. Inspect Gradients After Backward",
+    "text": "6. Inspect Gradients After Backward\n\n# Run one forward+backward pass and inspect gradients\nx_sample, y_sample = next(iter(train_loader))\noptimizer.zero_grad()\nlogits = model(x_sample)\nloss = criterion(logits, y_sample)\nloss.backward()\n\nfor name, param in model.named_parameters():\n    print(f\"{name:30s} grad norm: {param.grad.norm():.4f}\")\n\n0.weight                       grad norm: 0.3368\n0.bias                         grad norm: 0.0945\n2.weight                       grad norm: 0.4265\n2.bias                         grad norm: 0.0517"
+  },
+  {
+    "objectID": "notebooks/MFML/week05_backprop_digits.html#exercises",
+    "href": "notebooks/MFML/week05_backprop_digits.html#exercises",
+    "title": "MFML Week 5: Manual Backprop",
+    "section": "Exercises",
+    "text": "Exercises\n\nWhat is loss.grad_fn? Follow the chain back 3 steps by accessing .next_functions. What does each node represent?\nSet requires_grad=False on the first layer’s weights: model[0].weight.requires_grad = False. What happens to training speed and final accuracy?\nTry a deeper network by adding a nn.Linear(64, 64), nn.ReLU() layer at the start. Does validation accuracy improve?"
+  },
+  {
+    "objectID": "notebooks/MFML/week04_classifier_iris.html",
+    "href": "notebooks/MFML/week04_classifier_iris.html",
+    "title": "MFML Week 4: First nn.Module Classifier",
+    "section": "",
+    "text": "Open In Colab"
+  },
+  {
+    "objectID": "notebooks/MFML/week04_classifier_iris.html#learning-objectives",
+    "href": "notebooks/MFML/week04_classifier_iris.html#learning-objectives",
+    "title": "MFML Week 4: First nn.Module Classifier",
+    "section": "Learning Objectives",
+    "text": "Learning Objectives\n\nUse CrossEntropyLoss for multi-class classification\nUnderstand why class labels must be long (integer) tensors\nCompute classification accuracy and visualize a confusion matrix"
+  },
+  {
+    "objectID": "notebooks/MFML/week04_classifier_iris.html#setup",
+    "href": "notebooks/MFML/week04_classifier_iris.html#setup",
+    "title": "MFML Week 4: First nn.Module Classifier",
+    "section": "Setup",
+    "text": "Setup\n\n!pip install git+https://github.com/ECLIPSE-Lab/Ai4MatLectures.git \"mdsdata&gt;=0.1.5\"\n\n\nimport torch\nimport torch.nn as nn\nfrom torch.utils.data import DataLoader, random_split\nfrom ai4mat.datasets import IrisDataset\nimport matplotlib.pyplot as plt\nimport numpy as np"
+  },
+  {
+    "objectID": "notebooks/MFML/week04_classifier_iris.html#load-the-data",
+    "href": "notebooks/MFML/week04_classifier_iris.html#load-the-data",
+    "title": "MFML Week 4: First nn.Module Classifier",
+    "section": "1. Load the Data",
+    "text": "1. Load the Data\n\ndataset = IrisDataset()\nprint(f\"Dataset size: {len(dataset)}\")\nx0, y0 = dataset[0]\nprint(f\"Sample x shape: {x0.shape}, dtype: {x0.dtype}\")\nprint(f\"Sample y: {y0}, dtype: {y0.dtype}\")\nprint(f\"Number of classes: {len(torch.unique(torch.tensor([dataset[i][1] for i in range(len(dataset))])))}\")\n\nDataset size: 150\nSample x shape: torch.Size([4]), dtype: torch.float32\nSample y: 0, dtype: torch.int64\nNumber of classes: 3\n\n\n\n# Visualize pairwise scatter of first two features\nX_all = torch.stack([dataset[i][0] for i in range(len(dataset))])\ny_all = torch.tensor([dataset[i][1] for i in range(len(dataset))])\n\nfeature_names = [\"Sepal length\", \"Sepal width\", \"Petal length\", \"Petal width\"]\nclass_names = [\"Setosa\", \"Versicolor\", \"Virginica\"]\ncolors = [\"tab:blue\", \"tab:orange\", \"tab:green\"]\n\nfig, axes = plt.subplots(1, 2, figsize=(10, 4))\nfor cls in range(3):\n    mask = y_all == cls\n    axes[0].scatter(X_all[mask, 0], X_all[mask, 1], label=class_names[cls], alpha=0.7)\n    axes[1].scatter(X_all[mask, 2], X_all[mask, 3], label=class_names[cls], alpha=0.7)\n\naxes[0].set_xlabel(feature_names[0])\naxes[0].set_ylabel(feature_names[1])\naxes[0].set_title(\"Features 0 vs 1\")\naxes[0].legend()\n\naxes[1].set_xlabel(feature_names[2])\naxes[1].set_ylabel(feature_names[3])\naxes[1].set_title(\"Features 2 vs 3\")\naxes[1].legend()\n\nplt.tight_layout()\nplt.show()"
+  },
+  {
+    "objectID": "notebooks/MFML/week04_classifier_iris.html#trainval-split",
+    "href": "notebooks/MFML/week04_classifier_iris.html#trainval-split",
+    "title": "MFML Week 4: First nn.Module Classifier",
+    "section": "2. Train/Val Split",
+    "text": "2. Train/Val Split\n\nn_train = int(0.8 * len(dataset))\nn_val = len(dataset) - n_train\ntrain_ds, val_ds = random_split(dataset, [n_train, n_val])\n\ntrain_loader = DataLoader(train_ds, batch_size=32, shuffle=True)\nval_loader   = DataLoader(val_ds,   batch_size=32, shuffle=False)\nprint(f\"Train: {n_train} | Val: {n_val}\")\n\nTrain: 120 | Val: 30"
+  },
+  {
+    "objectID": "notebooks/MFML/week04_classifier_iris.html#define-the-model",
+    "href": "notebooks/MFML/week04_classifier_iris.html#define-the-model",
+    "title": "MFML Week 4: First nn.Module Classifier",
+    "section": "3. Define the Model",
+    "text": "3. Define the Model\n\n# CrossEntropyLoss expects raw logits (no softmax) as input\n# and long integer class indices as targets\nmodel = nn.Sequential(\n    nn.Linear(4, 16),\n    nn.ReLU(),\n    nn.Linear(16, 3)\n)\nprint(model)\nprint(f\"Parameters: {sum(p.numel() for p in model.parameters())}\")\n\nSequential(\n  (0): Linear(in_features=4, out_features=16, bias=True)\n  (1): ReLU()\n  (2): Linear(in_features=16, out_features=3, bias=True)\n)\nParameters: 131"
+  },
+  {
+    "objectID": "notebooks/MFML/week04_classifier_iris.html#training-loop",
+    "href": "notebooks/MFML/week04_classifier_iris.html#training-loop",
+    "title": "MFML Week 4: First nn.Module Classifier",
+    "section": "4. Training Loop",
+    "text": "4. Training Loop\n\ncriterion = nn.CrossEntropyLoss()\noptimizer = torch.optim.Adam(model.parameters(), lr=1e-3)\n\ntrain_losses, val_losses = [], []\ntrain_accs, val_accs = [], []\n\ndef accuracy(logits, labels):\n    preds = logits.argmax(dim=1)\n    return (preds == labels).float().mean().item()\n\nfor epoch in range(100):\n    model.train()\n    epoch_loss, epoch_acc = 0.0, 0.0\n    for x_batch, y_batch in train_loader:\n        optimizer.zero_grad()\n        logits = model(x_batch)\n        loss = criterion(logits, y_batch)\n        loss.backward()\n        optimizer.step()\n        epoch_loss += loss.item() * len(x_batch)\n        epoch_acc  += accuracy(logits, y_batch) * len(x_batch)\n    train_losses.append(epoch_loss / n_train)\n    train_accs.append(epoch_acc / n_train)\n\n    model.eval()\n    val_loss, val_acc = 0.0, 0.0\n    with torch.no_grad():\n        for x_batch, y_batch in val_loader:\n            logits = model(x_batch)\n            val_loss += criterion(logits, y_batch).item() * len(x_batch)\n            val_acc  += accuracy(logits, y_batch) * len(x_batch)\n    val_losses.append(val_loss / n_val)\n    val_accs.append(val_acc / n_val)\n\nfig, axes = plt.subplots(1, 2, figsize=(12, 4))\naxes[0].plot(train_losses, label='Train')\naxes[0].plot(val_losses, label='Val')\naxes[0].set_xlabel(\"Epoch\"); axes[0].set_ylabel(\"Cross-Entropy Loss\")\naxes[0].set_title(\"Loss Curve\"); axes[0].legend()\n\naxes[1].plot(train_accs, label='Train')\naxes[1].plot(val_accs, label='Val')\naxes[1].set_xlabel(\"Epoch\"); axes[1].set_ylabel(\"Accuracy\")\naxes[1].set_title(\"Accuracy Curve\"); axes[1].legend()\n\nplt.tight_layout()\nplt.show()\nprint(f\"Final val accuracy: {val_accs[-1]:.3f}\")\n\n\n\n\n\n\n\n\nFinal val accuracy: 0.900"
+  },
+  {
+    "objectID": "notebooks/MFML/week04_classifier_iris.html#evaluation",
+    "href": "notebooks/MFML/week04_classifier_iris.html#evaluation",
+    "title": "MFML Week 4: First nn.Module Classifier",
+    "section": "5. Evaluation",
+    "text": "5. Evaluation\n\n# Compute predictions on full dataset\nmodel.eval()\nwith torch.no_grad():\n    logits_all = model(X_all)\n    preds_all = logits_all.argmax(dim=1)\n\n# Build confusion matrix manually (no sklearn)\nn_classes = 3\nconf_matrix = torch.zeros(n_classes, n_classes, dtype=torch.long)\nfor true, pred in zip(y_all, preds_all):\n    conf_matrix[true.item(), pred.item()] += 1\n\nprint(\"Confusion Matrix (rows=true, cols=predicted):\")\nprint(conf_matrix.numpy())\nprint(f\"\\nOverall accuracy: {(preds_all == y_all).float().mean().item():.3f}\")\n\nConfusion Matrix (rows=true, cols=predicted):\n[[50  0  0]\n [ 0 34 16]\n [ 0  0 50]]\n\nOverall accuracy: 0.893\n\n\n\n# Visualize confusion matrix\nfig, ax = plt.subplots(figsize=(5, 4))\nim = ax.imshow(conf_matrix.numpy(), cmap='Blues')\nplt.colorbar(im, ax=ax)\nax.set_xticks(range(n_classes)); ax.set_xticklabels(class_names)\nax.set_yticks(range(n_classes)); ax.set_yticklabels(class_names)\nax.set_xlabel(\"Predicted\")\nax.set_ylabel(\"True\")\nax.set_title(\"Confusion Matrix\")\n\nfor i in range(n_classes):\n    for j in range(n_classes):\n        ax.text(j, i, conf_matrix[i, j].item(),\n                ha='center', va='center', color='black', fontsize=12)\n\nplt.tight_layout()\nplt.show()"
+  },
+  {
+    "objectID": "notebooks/MFML/week04_classifier_iris.html#exercises",
+    "href": "notebooks/MFML/week04_classifier_iris.html#exercises",
+    "title": "MFML Week 4: First nn.Module Classifier",
+    "section": "Exercises",
+    "text": "Exercises\n\nTry nn.Linear(4, 3) directly (no hidden layer) — how does the final accuracy change? Why does the hidden layer help?\nPlot learning curves for both train and val accuracy on the same axes. At what epoch does validation accuracy plateau?\nChange batch_size from 32 to 4. How does the training curve change? Why is small batch size sometimes called “noisy” optimization?"
+  },
+  {
+    "objectID": "notebooks/MFML/week07_overfitting_ising_light.html",
+    "href": "notebooks/MFML/week07_overfitting_ising_light.html",
+    "title": "MFML Week 7: Overfitting and Regularization",
+    "section": "",
+    "text": "Open In Colab"
+  },
+  {
+    "objectID": "notebooks/MFML/week07_overfitting_ising_light.html#learning-objectives",
+    "href": "notebooks/MFML/week07_overfitting_ising_light.html#learning-objectives",
+    "title": "MFML Week 7: Overfitting and Regularization",
+    "section": "Learning Objectives",
+    "text": "Learning Objectives\n\nObserve overfitting via train/val loss divergence for different model sizes\nUnderstand the bias-variance tradeoff empirically\nApply L2 regularization via weight_decay in the optimizer"
+  },
+  {
+    "objectID": "notebooks/MFML/week07_overfitting_ising_light.html#setup",
+    "href": "notebooks/MFML/week07_overfitting_ising_light.html#setup",
+    "title": "MFML Week 7: Overfitting and Regularization",
+    "section": "Setup",
+    "text": "Setup\n\n!pip install git+https://github.com/ECLIPSE-Lab/Ai4MatLectures.git \"mdsdata&gt;=0.1.5\"\n\n\nimport torch\nimport torch.nn as nn\nfrom torch.utils.data import DataLoader, random_split\nfrom ai4mat.datasets import IsingDataset\nimport matplotlib.pyplot as plt"
+  },
+  {
+    "objectID": "notebooks/MFML/week07_overfitting_ising_light.html#load-the-data",
+    "href": "notebooks/MFML/week07_overfitting_ising_light.html#load-the-data",
+    "title": "MFML Week 7: Overfitting and Regularization",
+    "section": "1. Load the Data",
+    "text": "1. Load the Data\n\ndataset = IsingDataset(size='light')\nprint(f\"Dataset size: {len(dataset)}\")\nx0, y0 = dataset[0]\nprint(f\"Sample x shape: {x0.shape}, dtype: {x0.dtype}\")\nprint(f\"Sample y: {y0}, dtype: {y0.dtype}\")\nprint(f\"Classes: {torch.unique(torch.tensor([dataset[i][1] for i in range(len(dataset))])).tolist()}\")\n\nDataset size: 5000\nSample x shape: torch.Size([1, 16, 16]), dtype: torch.float32\nSample y: 1, dtype: torch.int64\nClasses: [0, 1]\n\n\n\n# Visualize a few Ising configurations\nfig, axes = plt.subplots(2, 6, figsize=(14, 5))\nlabel_names = {0: \"Disordered (T &gt; Tc)\", 1: \"Ordered (T &lt; Tc)\"}\nfor i, ax in enumerate(axes.flat):\n    img = dataset[i][0].squeeze().numpy()\n    ax.imshow(img, cmap='gray', vmin=0, vmax=1)\n    ax.set_title(f\"y={dataset[i][1].item()}\", fontsize=8)\n    ax.axis('off')\nplt.suptitle(\"Ising spin configurations (16×16)\")\nplt.tight_layout()\nplt.show()"
+  },
+  {
+    "objectID": "notebooks/MFML/week07_overfitting_ising_light.html#trainval-split",
+    "href": "notebooks/MFML/week07_overfitting_ising_light.html#trainval-split",
+    "title": "MFML Week 7: Overfitting and Regularization",
+    "section": "2. Train/Val Split",
+    "text": "2. Train/Val Split\n\nn_train = int(0.8 * len(dataset))\nn_val = len(dataset) - n_train\ntrain_ds, val_ds = random_split(dataset, [n_train, n_val])\n\ntrain_loader = DataLoader(train_ds, batch_size=64, shuffle=True)\nval_loader   = DataLoader(val_ds,   batch_size=64, shuffle=False)\nprint(f\"Train: {n_train} | Val: {n_val}\")\n\nTrain: 4000 | Val: 1000"
+  },
+  {
+    "objectID": "notebooks/MFML/week07_overfitting_ising_light.html#three-model-variants",
+    "href": "notebooks/MFML/week07_overfitting_ising_light.html#three-model-variants",
+    "title": "MFML Week 7: Overfitting and Regularization",
+    "section": "3. Three Model Variants",
+    "text": "3. Three Model Variants\nWe define three models of increasing capacity to illustrate the bias-variance tradeoff.\n\ndef make_underfit():\n    \"\"\"Underfitting: too few parameters to capture the decision boundary.\"\"\"\n    return nn.Sequential(\n        nn.Flatten(),\n        nn.Linear(256, 2)\n    )\n\ndef make_goodfit():\n    \"\"\"Good fit: moderate capacity, good generalization.\"\"\"\n    return nn.Sequential(\n        nn.Flatten(),\n        nn.Linear(256, 64),\n        nn.ReLU(),\n        nn.Linear(64, 2)\n    )\n\ndef make_overfit():\n    \"\"\"Overfitting: too many parameters, memorizes training data.\"\"\"\n    return nn.Sequential(\n        nn.Flatten(),\n        nn.Linear(256, 256),\n        nn.ReLU(),\n        nn.Linear(256, 256),\n        nn.ReLU(),\n        nn.Linear(256, 2)\n    )\n\nfor name, fn in [(\"Underfit\", make_underfit), (\"Good fit\", make_goodfit), (\"Overfit\", make_overfit)]:\n    m = fn()\n    n_params = sum(p.numel() for p in m.parameters())\n    print(f\"{name:12s}: {n_params:&gt;7,} parameters\")\n\nUnderfit    :     514 parameters\nGood fit    :  16,578 parameters\nOverfit     : 132,098 parameters"
+  },
+  {
+    "objectID": "notebooks/MFML/week07_overfitting_ising_light.html#training-loop",
+    "href": "notebooks/MFML/week07_overfitting_ising_light.html#training-loop",
+    "title": "MFML Week 7: Overfitting and Regularization",
+    "section": "4. Training Loop",
+    "text": "4. Training Loop\n\ndef train_model(model, train_loader, val_loader, n_train, n_val,\n                lr=1e-3, weight_decay=0.0, epochs=50):\n    criterion = nn.CrossEntropyLoss()\n    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)\n    train_losses, val_losses = [], []\n\n    for epoch in range(epochs):\n        model.train()\n        ep_loss = 0.0\n        for x_batch, y_batch in train_loader:\n            optimizer.zero_grad()\n            loss = criterion(model(x_batch), y_batch)\n            loss.backward()\n            optimizer.step()\n            ep_loss += loss.item() * len(x_batch)\n        train_losses.append(ep_loss / n_train)\n\n        model.eval()\n        v_loss = 0.0\n        with torch.no_grad():\n            for x_batch, y_batch in val_loader:\n                v_loss += criterion(model(x_batch), y_batch).item() * len(x_batch)\n        val_losses.append(v_loss / n_val)\n\n    return train_losses, val_losses\n\n# Train all three models\ntorch.manual_seed(0)\nresults = {}\nfor name, fn in [(\"Underfit\", make_underfit), (\"Good fit\", make_goodfit), (\"Overfit\", make_overfit)]:\n    model = fn()\n    tl, vl = train_model(model, train_loader, val_loader, n_train, n_val)\n    results[name] = (tl, vl)\n    print(f\"{name:12s} — final train loss: {tl[-1]:.4f}, val loss: {vl[-1]:.4f}\")\n\nUnderfit     — final train loss: 0.6691, val loss: 0.7331\nGood fit     — final train loss: 0.0023, val loss: 0.2267\nOverfit      — final train loss: 0.0000, val loss: 0.3630"
+  },
+  {
+    "objectID": "notebooks/MFML/week07_overfitting_ising_light.html#compare-learning-curves",
+    "href": "notebooks/MFML/week07_overfitting_ising_light.html#compare-learning-curves",
+    "title": "MFML Week 7: Overfitting and Regularization",
+    "section": "5. Compare Learning Curves",
+    "text": "5. Compare Learning Curves\n\nfig, axes = plt.subplots(1, 3, figsize=(15, 4))\ncolors = {'train': 'tab:blue', 'val': 'tab:orange'}\n\nfor ax, (name, (tl, vl)) in zip(axes, results.items()):\n    ax.plot(tl, label='Train', color=colors['train'])\n    ax.plot(vl, label='Val',   color=colors['val'])\n    ax.set_title(name)\n    ax.set_xlabel(\"Epoch\")\n    ax.set_ylabel(\"Cross-Entropy Loss\")\n    ax.legend()\n    ax.set_ylim(0, max(max(tl), max(vl)) * 1.1)\n\nplt.suptitle(\"Bias-Variance Tradeoff: Train vs Val Loss\", fontsize=13)\nplt.tight_layout()\nplt.show()"
+  },
+  {
+    "objectID": "notebooks/MFML/week07_overfitting_ising_light.html#regularization-with-weight-decay",
+    "href": "notebooks/MFML/week07_overfitting_ising_light.html#regularization-with-weight-decay",
+    "title": "MFML Week 7: Overfitting and Regularization",
+    "section": "6. Regularization with Weight Decay",
+    "text": "6. Regularization with Weight Decay\nThe overfitting model can be tamed by adding L2 regularization (weight_decay in Adam).\n\ntorch.manual_seed(0)\noverfit_model_reg = make_overfit()\ntl_reg, vl_reg = train_model(overfit_model_reg, train_loader, val_loader,\n                              n_train, n_val, weight_decay=1e-4)\n\noverfit_tl, overfit_vl = results[\"Overfit\"]\n\nplt.figure(figsize=(8, 4))\nplt.plot(overfit_tl, '--', color='tab:blue',   label='Overfit — train (no reg)')\nplt.plot(overfit_vl, '--', color='tab:orange', label='Overfit — val (no reg)')\nplt.plot(tl_reg,     '-',  color='tab:blue',   label='Overfit — train (weight_decay=1e-4)')\nplt.plot(vl_reg,     '-',  color='tab:orange', label='Overfit — val (weight_decay=1e-4)')\nplt.xlabel(\"Epoch\")\nplt.ylabel(\"Cross-Entropy Loss\")\nplt.title(\"Effect of L2 Regularization on Overfit Model\")\nplt.legend(fontsize=8)\nplt.tight_layout()\nplt.show()"
+  },
+  {
+    "objectID": "notebooks/MFML/week07_overfitting_ising_light.html#exercises",
+    "href": "notebooks/MFML/week07_overfitting_ising_light.html#exercises",
+    "title": "MFML Week 7: Overfitting and Regularization",
+    "section": "Exercises",
+    "text": "Exercises\n\nAt what model size (number of parameters) does overfitting first appear? Train a model with one extra layer in the “Good fit” config and observe the learning curves.\nTry weight_decay=1e-2 vs 1e-4 vs 0 for the overfit model. How does the gap between train and val loss change?\nAdd nn.Dropout(0.5) after each nn.ReLU() in the overfit model. Does dropout reduce overfitting as effectively as weight decay?"
+  },
+  {
+    "objectID": "notebooks/MLPC/week04_baseline_digits.html",
+    "href": "notebooks/MLPC/week04_baseline_digits.html",
+    "title": "MLPC Week 4: Linear Baseline for Digit Classification",
+    "section": "",
+    "text": "Open In Colab"
+  },
+  {
+    "objectID": "notebooks/MLPC/week04_baseline_digits.html#learning-objectives",
+    "href": "notebooks/MLPC/week04_baseline_digits.html#learning-objectives",
+    "title": "MLPC Week 4: Linear Baseline for Digit Classification",
+    "section": "Learning Objectives",
+    "text": "Learning Objectives\n\nEstablish a linear baseline before building more complex models\nUnderstand why linear models struggle with raw pixel features\nInterpret the learned weight matrix as a set of class templates"
+  },
+  {
+    "objectID": "notebooks/MLPC/week04_baseline_digits.html#setup",
+    "href": "notebooks/MLPC/week04_baseline_digits.html#setup",
+    "title": "MLPC Week 4: Linear Baseline for Digit Classification",
+    "section": "Setup",
+    "text": "Setup\n\n!pip install git+https://github.com/ECLIPSE-Lab/Ai4MatLectures.git \"mdsdata&gt;=0.1.5\"\n\n\nimport torch\nimport torch.nn as nn\nfrom torch.utils.data import DataLoader, random_split\nfrom ai4mat.datasets import DigitsDataset\nimport matplotlib.pyplot as plt\nimport numpy as np"
+  },
+  {
+    "objectID": "notebooks/MLPC/week04_baseline_digits.html#load-the-data",
+    "href": "notebooks/MLPC/week04_baseline_digits.html#load-the-data",
+    "title": "MLPC Week 4: Linear Baseline for Digit Classification",
+    "section": "1. Load the Data",
+    "text": "1. Load the Data\n\ndataset = DigitsDataset()\nprint(f\"Dataset size: {len(dataset)}\")\nx0, y0 = dataset[0]\nprint(f\"Sample x shape: {x0.shape}, dtype: {x0.dtype}  (flattened 8×8 image)\")\nprint(f\"Sample y: {y0}\")\n\nX_all = torch.stack([dataset[i][0] for i in range(len(dataset))])\ny_all = torch.tensor([dataset[i][1] for i in range(len(dataset))])\nprint(f\"\\nAll classes: {torch.unique(y_all).tolist()}\")\n\nDataset size: 5620\nSample x shape: torch.Size([64]), dtype: torch.float32  (flattened 8×8 image)\nSample y: 0\n\nAll classes: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]\n\n\n\n# Show sample images\nfig, axes = plt.subplots(2, 10, figsize=(16, 4))\nfor digit in range(10):\n    idxs = (y_all == digit).nonzero(as_tuple=True)[0][:2]\n    for row, idx in enumerate(idxs):\n        axes[row, digit].imshow(X_all[idx].reshape(8, 8).numpy(), cmap='gray_r')\n        axes[row, digit].set_title(str(digit), fontsize=9)\n        axes[row, digit].axis('off')\nplt.suptitle(\"Two examples per digit class\")\nplt.tight_layout()\nplt.show()"
+  },
+  {
+    "objectID": "notebooks/MLPC/week04_baseline_digits.html#trainval-split",
+    "href": "notebooks/MLPC/week04_baseline_digits.html#trainval-split",
+    "title": "MLPC Week 4: Linear Baseline for Digit Classification",
+    "section": "2. Train/Val Split",
+    "text": "2. Train/Val Split\n\nn_train = int(0.8 * len(dataset))\nn_val = len(dataset) - n_train\ntrain_ds, val_ds = random_split(dataset, [n_train, n_val])\n\ntrain_loader = DataLoader(train_ds, batch_size=64, shuffle=True)\nval_loader   = DataLoader(val_ds,   batch_size=64, shuffle=False)\nprint(f\"Train: {n_train} | Val: {n_val}\")\n\nTrain: 4496 | Val: 1124"
+  },
+  {
+    "objectID": "notebooks/MLPC/week04_baseline_digits.html#define-the-model-logistic-regression",
+    "href": "notebooks/MLPC/week04_baseline_digits.html#define-the-model-logistic-regression",
+    "title": "MLPC Week 4: Linear Baseline for Digit Classification",
+    "section": "3. Define the Model — Logistic Regression",
+    "text": "3. Define the Model — Logistic Regression\nResearch question: What is the best accuracy a linear model can achieve on raw pixel features?\n\n# Logistic regression = single linear layer with CrossEntropyLoss\n# (no hidden layers, no nonlinearity)\nmodel = nn.Linear(64, 10)\nprint(model)\nprint(f\"Parameters: {sum(p.numel() for p in model.parameters()):,}\")\nprint(f\"Input:  64 pixel values  →  Output: 10 class logits\")\n\nLinear(in_features=64, out_features=10, bias=True)\nParameters: 650\nInput:  64 pixel values  →  Output: 10 class logits"
+  },
+  {
+    "objectID": "notebooks/MLPC/week04_baseline_digits.html#training-loop",
+    "href": "notebooks/MLPC/week04_baseline_digits.html#training-loop",
+    "title": "MLPC Week 4: Linear Baseline for Digit Classification",
+    "section": "4. Training Loop",
+    "text": "4. Training Loop\n\ncriterion = nn.CrossEntropyLoss()\noptimizer = torch.optim.Adam(model.parameters(), lr=1e-3)\n\ntrain_losses, val_losses = [], []\ntrain_accs, val_accs = [], []\n\ndef accuracy(logits, labels):\n    return (logits.argmax(dim=1) == labels).float().mean().item()\n\nfor epoch in range(50):\n    model.train()\n    ep_loss, ep_acc = 0.0, 0.0\n    for x_batch, y_batch in train_loader:\n        optimizer.zero_grad()\n        logits = model(x_batch)\n        loss = criterion(logits, y_batch)\n        loss.backward()\n        optimizer.step()\n        ep_loss += loss.item() * len(x_batch)\n        ep_acc  += accuracy(logits, y_batch) * len(x_batch)\n    train_losses.append(ep_loss / n_train)\n    train_accs.append(ep_acc / n_train)\n\n    model.eval()\n    v_loss, v_acc = 0.0, 0.0\n    with torch.no_grad():\n        for x_batch, y_batch in val_loader:\n            logits = model(x_batch)\n            v_loss += criterion(logits, y_batch).item() * len(x_batch)\n            v_acc  += accuracy(logits, y_batch) * len(x_batch)\n    val_losses.append(v_loss / n_val)\n    val_accs.append(v_acc / n_val)\n\nfig, axes = plt.subplots(1, 2, figsize=(12, 4))\naxes[0].plot(train_losses, label='Train'); axes[0].plot(val_losses, label='Val')\naxes[0].set_xlabel(\"Epoch\"); axes[0].set_ylabel(\"Loss\"); axes[0].legend()\naxes[0].set_title(\"Loss\")\naxes[1].plot(train_accs, label='Train'); axes[1].plot(val_accs, label='Val')\naxes[1].set_xlabel(\"Epoch\"); axes[1].set_ylabel(\"Accuracy\"); axes[1].legend()\naxes[1].set_title(\"Accuracy\")\nplt.tight_layout(); plt.show()\nprint(f\"Final val accuracy (linear model): {val_accs[-1]:.3f}\")\n\n\n\n\n\n\n\n\nFinal val accuracy (linear model): 0.959"
+  },
+  {
+    "objectID": "notebooks/MLPC/week04_baseline_digits.html#evaluation",
+    "href": "notebooks/MLPC/week04_baseline_digits.html#evaluation",
+    "title": "MLPC Week 4: Linear Baseline for Digit Classification",
+    "section": "5. Evaluation",
+    "text": "5. Evaluation\n\n# Visualize the weight matrix as class templates\n# Each column of W is a 64-dim vector — reshape to 8x8 image\nW = model.weight.data.numpy()  # shape: (10, 64)\n\nfig, axes = plt.subplots(1, 10, figsize=(16, 2))\nfor digit in range(10):\n    template = W[digit].reshape(8, 8)\n    vmax = np.abs(template).max()\n    axes[digit].imshow(template, cmap='RdBu_r', vmin=-vmax, vmax=vmax)\n    axes[digit].set_title(str(digit))\n    axes[digit].axis('off')\nplt.suptitle(\"Learned weight templates (red=positive, blue=negative)\")\nplt.tight_layout()\nplt.show()\n\n\n\n\n\n\n\n\n\n# Find which digits are most confused\nmodel.eval()\nconf = torch.zeros(10, 10, dtype=torch.long)\nwith torch.no_grad():\n    for x_batch, y_batch in val_loader:\n        preds = model(x_batch).argmax(dim=1)\n        for t, p in zip(y_batch, preds):\n            conf[t.item(), p.item()] += 1\n\n# Most confused pairs\nerrors = []\nfor i in range(10):\n    for j in range(10):\n        if i != j and conf[i, j] &gt; 0:\n            errors.append((conf[i, j].item(), i, j))\nerrors.sort(reverse=True)\nprint(\"Top confusion pairs (true → predicted, count):\")\nfor count, true, pred in errors[:5]:\n    print(f\"  {true} → {pred}: {count} errors\")\n\nTop confusion pairs (true → predicted, count):\n  1 → 8: 6 errors\n  9 → 5: 4 errors\n  5 → 9: 4 errors\n  4 → 9: 4 errors\n  8 → 1: 3 errors"
+  },
+  {
+    "objectID": "notebooks/MLPC/week04_baseline_digits.html#exercises",
+    "href": "notebooks/MLPC/week04_baseline_digits.html#exercises",
+    "title": "MLPC Week 4: Linear Baseline for Digit Classification",
+    "section": "Exercises",
+    "text": "Exercises\n\nAdd one hidden layer: nn.Sequential(nn.Linear(64, 32), nn.ReLU(), nn.Linear(32, 10)). By how many percentage points does val accuracy increase?\nThe weight matrix model.weight has shape (10, 64). Plot each row as an 8×8 image. Do they look like digit templates? What does this tell you about what a linear classifier has learned?\nExamine the confusion matrix. Which two digits does the linear model confuse most often? Why might those be especially hard?"
+  },
+  {
+    "objectID": "notebooks/MLPC/week05_cnn_ising_full.html",
+    "href": "notebooks/MLPC/week05_cnn_ising_full.html",
+    "title": "MLPC Week 5: CNN for 64×64 Microstructures",
+    "section": "",
+    "text": "Open In Colab"
+  },
+  {
+    "objectID": "notebooks/MLPC/week05_cnn_ising_full.html#learning-objectives",
+    "href": "notebooks/MLPC/week05_cnn_ising_full.html#learning-objectives",
+    "title": "MLPC Week 5: CNN for 64×64 Microstructures",
+    "section": "Learning Objectives",
+    "text": "Learning Objectives\n\nScale a CNN architecture to larger (64×64) microstructure images\nUnderstand how depth and pooling affect feature map resolution\nDiscuss how dataset size influences achievable accuracy"
+  },
+  {
+    "objectID": "notebooks/MLPC/week05_cnn_ising_full.html#setup",
+    "href": "notebooks/MLPC/week05_cnn_ising_full.html#setup",
+    "title": "MLPC Week 5: CNN for 64×64 Microstructures",
+    "section": "Setup",
+    "text": "Setup\n\n!pip install git+https://github.com/ECLIPSE-Lab/Ai4MatLectures.git \"mdsdata&gt;=0.1.5\"\n\n\nimport torch\nimport torch.nn as nn\nfrom torch.utils.data import DataLoader, random_split\nfrom ai4mat.datasets import IsingDataset\nimport matplotlib.pyplot as plt\nimport numpy as np"
+  },
+  {
+    "objectID": "notebooks/MLPC/week05_cnn_ising_full.html#load-the-data",
+    "href": "notebooks/MLPC/week05_cnn_ising_full.html#load-the-data",
+    "title": "MLPC Week 5: CNN for 64×64 Microstructures",
+    "section": "1. Load the Data",
+    "text": "1. Load the Data\n\ndataset = IsingDataset(size='full')\nprint(f\"Dataset size: {len(dataset)}\")\nx0, y0 = dataset[0]\nprint(f\"Sample x shape: {x0.shape}  (C=1, H=64, W=64)\")\nprint(f\"Sample y: {y0}  (0=disordered, 1=ordered)\")\n\nDataset size: 5000\nSample x shape: torch.Size([1, 64, 64])  (C=1, H=64, W=64)\nSample y: 0  (0=disordered, 1=ordered)\n\n\n\nfig, axes = plt.subplots(2, 5, figsize=(14, 6))\nfor i, ax in enumerate(axes.flat):\n    img = dataset[i * 500][0].squeeze().numpy()\n    label = dataset[i * 500][1].item()\n    ax.imshow(img, cmap='gray', vmin=0, vmax=1)\n    ax.set_title(f\"{'Ordered' if label==1 else 'Disordered'}\", fontsize=8)\n    ax.axis('off')\nplt.suptitle(\"Ising spin configurations (64×64)\")\nplt.tight_layout()\nplt.show()"
+  },
+  {
+    "objectID": "notebooks/MLPC/week05_cnn_ising_full.html#trainval-split",
+    "href": "notebooks/MLPC/week05_cnn_ising_full.html#trainval-split",
+    "title": "MLPC Week 5: CNN for 64×64 Microstructures",
+    "section": "2. Train/Val Split",
+    "text": "2. Train/Val Split\n\nn_train = int(0.8 * len(dataset))\nn_val = len(dataset) - n_train\ntrain_ds, val_ds = random_split(dataset, [n_train, n_val])\n\ntrain_loader = DataLoader(train_ds, batch_size=64, shuffle=True)\nval_loader   = DataLoader(val_ds,   batch_size=64, shuffle=False)\nprint(f\"Train: {n_train} | Val: {n_val}\")\n\nTrain: 4000 | Val: 1000"
+  },
+  {
+    "objectID": "notebooks/MLPC/week05_cnn_ising_full.html#define-the-model",
+    "href": "notebooks/MLPC/week05_cnn_ising_full.html#define-the-model",
+    "title": "MLPC Week 5: CNN for 64×64 Microstructures",
+    "section": "3. Define the Model",
+    "text": "3. Define the Model\n\nclass CNN(nn.Module):\n    def __init__(self):\n        super().__init__()\n        self.features = nn.Sequential(\n            nn.Conv2d(1, 16, 3, padding=1), nn.ReLU(), nn.MaxPool2d(2),   # 32x32\n            nn.Conv2d(16, 32, 3, padding=1), nn.ReLU(), nn.MaxPool2d(2),  # 16x16\n        )\n        self.classifier = nn.Sequential(\n            nn.Flatten(),\n            nn.Linear(32 * 16 * 16, 64),\n            nn.ReLU(),\n            nn.Linear(64, 2)\n        )\n\n    def forward(self, x):\n        return self.classifier(self.features(x))\n\nmodel = CNN()\nprint(model)\nprint(f\"\\nTotal parameters: {sum(p.numel() for p in model.parameters()):,}\")\n\n# Trace feature map dimensions\nx_test = torch.zeros(1, 1, 64, 64)\nfeat = model.features(x_test)\nprint(f\"Feature map after 2 conv blocks: {feat.shape}  (B, C=32, H=16, W=16)\")\n\nCNN(\n  (features): Sequential(\n    (0): Conv2d(1, 16, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1))\n    (1): ReLU()\n    (2): MaxPool2d(kernel_size=2, stride=2, padding=0, dilation=1, ceil_mode=False)\n    (3): Conv2d(16, 32, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1))\n    (4): ReLU()\n    (5): MaxPool2d(kernel_size=2, stride=2, padding=0, dilation=1, ceil_mode=False)\n  )\n  (classifier): Sequential(\n    (0): Flatten(start_dim=1, end_dim=-1)\n    (1): Linear(in_features=8192, out_features=64, bias=True)\n    (2): ReLU()\n    (3): Linear(in_features=64, out_features=2, bias=True)\n  )\n)\n\nTotal parameters: 529,282\nFeature map after 2 conv blocks: torch.Size([1, 32, 16, 16])  (B, C=32, H=16, W=16)"
+  },
+  {
+    "objectID": "notebooks/MLPC/week05_cnn_ising_full.html#training-loop",
+    "href": "notebooks/MLPC/week05_cnn_ising_full.html#training-loop",
+    "title": "MLPC Week 5: CNN for 64×64 Microstructures",
+    "section": "4. Training Loop",
+    "text": "4. Training Loop\n\ncriterion = nn.CrossEntropyLoss()\noptimizer = torch.optim.Adam(model.parameters(), lr=1e-3)\n\ntrain_losses, val_losses = [], []\ntrain_accs, val_accs = [], []\n\nfor epoch in range(30):\n    model.train()\n    ep_loss, ep_acc = 0.0, 0.0\n    for x_batch, y_batch in train_loader:\n        optimizer.zero_grad()\n        logits = model(x_batch)\n        loss = criterion(logits, y_batch)\n        loss.backward()\n        optimizer.step()\n        ep_loss += loss.item() * len(x_batch)\n        ep_acc  += (logits.argmax(1) == y_batch).float().sum().item()\n    train_losses.append(ep_loss / n_train)\n    train_accs.append(ep_acc / n_train)\n\n    model.eval()\n    v_loss, v_acc = 0.0, 0.0\n    with torch.no_grad():\n        for x_batch, y_batch in val_loader:\n            logits = model(x_batch)\n            v_loss += criterion(logits, y_batch).item() * len(x_batch)\n            v_acc  += (logits.argmax(1) == y_batch).float().sum().item()\n    val_losses.append(v_loss / n_val)\n    val_accs.append(v_acc / n_val)\n\n    if (epoch + 1) % 10 == 0:\n        print(f\"Epoch {epoch+1:3d} | Train acc: {train_accs[-1]:.3f} | Val acc: {val_accs[-1]:.3f}\")\n\nfig, axes = plt.subplots(1, 2, figsize=(12, 4))\naxes[0].plot(train_losses, label='Train'); axes[0].plot(val_losses, label='Val')\naxes[0].set_xlabel(\"Epoch\"); axes[0].set_ylabel(\"Loss\"); axes[0].set_title(\"Loss\"); axes[0].legend()\naxes[1].plot(train_accs, label='Train'); axes[1].plot(val_accs, label='Val')\naxes[1].set_xlabel(\"Epoch\"); axes[1].set_ylabel(\"Accuracy\"); axes[1].set_title(\"Accuracy\"); axes[1].legend()\nplt.tight_layout(); plt.show()\nprint(f\"\\nFinal val accuracy: {val_accs[-1]:.3f}\")\n\nEpoch  10 | Train acc: 1.000 | Val acc: 0.985\nEpoch  20 | Train acc: 1.000 | Val acc: 0.986\nEpoch  30 | Train acc: 1.000 | Val acc: 0.985\n\n\n\n\n\n\n\n\n\n\nFinal val accuracy: 0.985"
+  },
+  {
+    "objectID": "notebooks/MLPC/week05_cnn_ising_full.html#evaluation",
+    "href": "notebooks/MLPC/week05_cnn_ising_full.html#evaluation",
+    "title": "MLPC Week 5: CNN for 64×64 Microstructures",
+    "section": "5. Evaluation",
+    "text": "5. Evaluation\n\n# Visualize some correct and incorrect predictions\nmodel.eval()\nx_show = torch.stack([val_ds[i][0] for i in range(20)])\ny_show = torch.tensor([val_ds[i][1] for i in range(20)])\nwith torch.no_grad():\n    preds = model(x_show).argmax(dim=1)\n\ncorrect = (preds == y_show)\nfig, axes = plt.subplots(2, 10, figsize=(16, 5))\nfor i in range(20):\n    ax = axes[i // 10, i % 10]\n    ax.imshow(x_show[i].squeeze().numpy(), cmap='gray', vmin=0, vmax=1)\n    color = 'green' if correct[i] else 'red'\n    ax.set_title(f\"T:{y_show[i].item()} P:{preds[i].item()}\", color=color, fontsize=7)\n    ax.axis('off')\nplt.suptitle(\"Predictions (green=correct, red=wrong)\")\nplt.tight_layout()\nplt.show()\n\n\n\n\n\n\n\n\n\n# Receptive field analysis\nprint(\"Receptive field calculation:\")\nprint(\"  After Conv1 (3x3, stride 1): RF = 3\")\nprint(\"  After MaxPool1 (2x2):         RF = 6\")\nprint(\"  After Conv2 (3x3, stride 1): RF = 10\")\nprint(\"  After MaxPool2 (2x2):         RF = 20\")\nprint()\nprint(\"Each neuron in the final feature map 'sees' a 20×20 region of the input.\")\nprint(\"For 64×64 Ising configs, this is ~10% of the total area — enough to\")\nprint(\"capture local spin order patterns without seeing the whole image.\")\n\nReceptive field calculation:\n  After Conv1 (3x3, stride 1): RF = 3\n  After MaxPool1 (2x2):         RF = 6\n  After Conv2 (3x3, stride 1): RF = 10\n  After MaxPool2 (2x2):         RF = 20\n\nEach neuron in the final feature map 'sees' a 20×20 region of the input.\nFor 64×64 Ising configs, this is ~10% of the total area — enough to\ncapture local spin order patterns without seeing the whole image."
+  },
+  {
+    "objectID": "notebooks/MLPC/week05_cnn_ising_full.html#exercises",
+    "href": "notebooks/MLPC/week05_cnn_ising_full.html#exercises",
+    "title": "MLPC Week 5: CNN for 64×64 Microstructures",
+    "section": "Exercises",
+    "text": "Exercises\n\nAdd a third conv block: nn.Conv2d(32, 64, 3, padding=1), nn.ReLU(), nn.MaxPool2d(2) (output: 8×8). Does accuracy improve or is it overkill for this binary task?\nWhat is the receptive field after 2 MaxPool layers (calculation shown above)? How does this compare to the correlation length in the Ising model near Tc?\nReduce the training data to 500 samples: train_ds_small, _ = random_split(dataset, [500, len(dataset)-500]). How fast does accuracy drop compared to using all 4000 training samples?"
+  },
+  {
+    "objectID": "notebooks/MG/week08_regression_nanoindentation.html",
+    "href": "notebooks/MG/week08_regression_nanoindentation.html",
+    "title": "MG Week 8: Generalization and Learning Curves",
+    "section": "",
+    "text": "Open In Colab"
+  },
+  {
+    "objectID": "notebooks/MG/week08_regression_nanoindentation.html#learning-objectives",
+    "href": "notebooks/MG/week08_regression_nanoindentation.html#learning-objectives",
+    "title": "MG Week 8: Generalization and Learning Curves",
+    "section": "Learning Objectives",
+    "text": "Learning Objectives\n\nApply a rigorous train/val/test protocol to evaluate generalization\nGenerate learning curves to understand sample efficiency\nVisualize 2D decision boundaries for a low-dimensional classifier"
+  },
+  {
+    "objectID": "notebooks/MG/week08_regression_nanoindentation.html#setup",
+    "href": "notebooks/MG/week08_regression_nanoindentation.html#setup",
+    "title": "MG Week 8: Generalization and Learning Curves",
+    "section": "Setup",
+    "text": "Setup\n\n!pip install git+https://github.com/ECLIPSE-Lab/Ai4MatLectures.git \"mdsdata&gt;=0.1.5\"\n\n\nimport torch\nimport torch.nn as nn\nfrom torch.utils.data import DataLoader, random_split, Subset\nfrom ai4mat.datasets import NanoindentationDataset\nimport matplotlib.pyplot as plt\nimport numpy as np"
+  },
+  {
+    "objectID": "notebooks/MG/week08_regression_nanoindentation.html#load-the-data",
+    "href": "notebooks/MG/week08_regression_nanoindentation.html#load-the-data",
+    "title": "MG Week 8: Generalization and Learning Curves",
+    "section": "1. Load the Data",
+    "text": "1. Load the Data\n\ndataset = NanoindentationDataset()\nprint(f\"Dataset size: {len(dataset)}\")\nx0, y0 = dataset[0]\nprint(f\"Sample x shape: {x0.shape}  (features: E [GPa], H [GPa])\")\nprint(f\"Sample y: {y0}  (material class, long)\")\n\nX_all = torch.stack([dataset[i][0] for i in range(len(dataset))]).numpy()\ny_all = torch.tensor([dataset[i][1] for i in range(len(dataset))]).numpy()\n\nn_classes = len(np.unique(y_all))\nprint(f\"\\nClasses: {np.unique(y_all).tolist()}\")\nprint(f\"Class counts: {dict(zip(*np.unique(y_all, return_counts=True)))}\")\n\nDataset size: 938\nSample x shape: torch.Size([2])  (features: E [GPa], H [GPa])\nSample y: 0  (material class, long)\n\nClasses: [0, 1, 2, 3]\nClass counts: {0: 30, 1: 513, 2: 364, 3: 31}\n\n\n\ncolors = ['tab:blue', 'tab:orange', 'tab:green', 'tab:red']\nplt.figure(figsize=(7, 5))\nfor cls in range(n_classes):\n    mask = y_all == cls\n    plt.scatter(X_all[mask, 0], X_all[mask, 1], alpha=0.6, s=20,\n                color=colors[cls], label=f\"Class {cls}\")\nplt.xlabel(\"Young's modulus E (GPa)\")\nplt.ylabel(\"Hardness H (GPa)\")\nplt.title(\"Nanoindentation dataset — ground truth labels\")\nplt.legend(); plt.tight_layout(); plt.show()"
+  },
+  {
+    "objectID": "notebooks/MG/week08_regression_nanoindentation.html#train-val-test-split-80-10-10",
+    "href": "notebooks/MG/week08_regression_nanoindentation.html#train-val-test-split-80-10-10",
+    "title": "MG Week 8: Generalization and Learning Curves",
+    "section": "2. Train / Val / Test Split (80 / 10 / 10)",
+    "text": "2. Train / Val / Test Split (80 / 10 / 10)\n\nn = len(dataset)\nn_train = int(0.8 * n)\nn_val   = int(0.1 * n)\nn_test  = n - n_train - n_val\n\ntorch.manual_seed(42)\ntrain_ds, val_ds, test_ds = random_split(dataset, [n_train, n_val, n_test])\n\ntrain_loader = DataLoader(train_ds, batch_size=64, shuffle=True)\nval_loader   = DataLoader(val_ds,   batch_size=64, shuffle=False)\ntest_loader  = DataLoader(test_ds,  batch_size=64, shuffle=False)\nprint(f\"Train: {n_train} | Val: {n_val} | Test: {n_test}\")\n\nTrain: 750 | Val: 93 | Test: 95"
+  },
+  {
+    "objectID": "notebooks/MG/week08_regression_nanoindentation.html#define-the-model",
+    "href": "notebooks/MG/week08_regression_nanoindentation.html#define-the-model",
+    "title": "MG Week 8: Generalization and Learning Curves",
+    "section": "3. Define the Model",
+    "text": "3. Define the Model\n\nmodel = nn.Sequential(\n    nn.Linear(2, 32), nn.ReLU(),\n    nn.Linear(32, 4)\n)\nprint(model)\nprint(f\"Parameters: {sum(p.numel() for p in model.parameters())}\")\n\nSequential(\n  (0): Linear(in_features=2, out_features=32, bias=True)\n  (1): ReLU()\n  (2): Linear(in_features=32, out_features=4, bias=True)\n)\nParameters: 228"
+  },
+  {
+    "objectID": "notebooks/MG/week08_regression_nanoindentation.html#training-loop",
+    "href": "notebooks/MG/week08_regression_nanoindentation.html#training-loop",
+    "title": "MG Week 8: Generalization and Learning Curves",
+    "section": "4. Training Loop",
+    "text": "4. Training Loop\n\ncriterion = nn.CrossEntropyLoss()\noptimizer = torch.optim.Adam(model.parameters(), lr=1e-3)\n\ntrain_accs, val_accs = [], []\n\nfor epoch in range(100):\n    model.train()\n    ep_acc = 0.0\n    for x_batch, y_batch in train_loader:\n        optimizer.zero_grad()\n        logits = model(x_batch)\n        loss = criterion(logits, y_batch)\n        loss.backward()\n        optimizer.step()\n        ep_acc += (logits.argmax(1) == y_batch).float().sum().item()\n    train_accs.append(ep_acc / n_train)\n\n    model.eval()\n    v_acc = 0.0\n    with torch.no_grad():\n        for x_batch, y_batch in val_loader:\n            logits = model(x_batch)\n            v_acc += (logits.argmax(1) == y_batch).float().sum().item()\n    val_accs.append(v_acc / n_val)\n\nplt.plot(train_accs, label='Train'); plt.plot(val_accs, label='Val')\nplt.xlabel(\"Epoch\"); plt.ylabel(\"Accuracy\"); plt.legend()\nplt.title(\"Training Curve\"); plt.tight_layout(); plt.show()\n\n# Final test accuracy (only inspect once!)\nmodel.eval()\ntest_acc = 0.0\nwith torch.no_grad():\n    for x_batch, y_batch in test_loader:\n        logits = model(x_batch)\n        test_acc += (logits.argmax(1) == y_batch).float().sum().item()\nprint(f\"Test accuracy: {test_acc / n_test:.3f}\")\n\n\n\n\n\n\n\n\nTest accuracy: 0.526"
+  },
+  {
+    "objectID": "notebooks/MG/week08_regression_nanoindentation.html#decision-boundary-visualization",
+    "href": "notebooks/MG/week08_regression_nanoindentation.html#decision-boundary-visualization",
+    "title": "MG Week 8: Generalization and Learning Curves",
+    "section": "5. Decision Boundary Visualization",
+    "text": "5. Decision Boundary Visualization\nThe 2D input space makes it possible to visualize the classifier boundary directly.\n\n# Build a fine grid over the feature space\nx_min, x_max = X_all[:, 0].min() - 1, X_all[:, 0].max() + 1\ny_min, y_max = X_all[:, 1].min() - 0.5, X_all[:, 1].max() + 0.5\nxx, yy = np.meshgrid(np.linspace(x_min, x_max, 300),\n                     np.linspace(y_min, y_max, 300))\ngrid = torch.tensor(np.c_[xx.ravel(), yy.ravel()], dtype=torch.float32)\n\nmodel.eval()\nwith torch.no_grad():\n    grid_preds = model(grid).argmax(dim=1).numpy()\n\nplt.figure(figsize=(8, 6))\nplt.contourf(xx, yy, grid_preds.reshape(xx.shape), alpha=0.3,\n             levels=[-0.5, 0.5, 1.5, 2.5, 3.5], colors=colors)\nfor cls in range(n_classes):\n    mask = y_all == cls\n    plt.scatter(X_all[mask, 0], X_all[mask, 1], s=20, alpha=0.7,\n                color=colors[cls], label=f\"Class {cls}\")\nplt.xlabel(\"E (GPa)\"); plt.ylabel(\"H (GPa)\")\nplt.title(\"Decision Boundary (shaded regions = predicted class)\")\nplt.legend(); plt.tight_layout(); plt.show()"
+  },
+  {
+    "objectID": "notebooks/MG/week08_regression_nanoindentation.html#learning-curve-sample-efficiency",
+    "href": "notebooks/MG/week08_regression_nanoindentation.html#learning-curve-sample-efficiency",
+    "title": "MG Week 8: Generalization and Learning Curves",
+    "section": "6. Learning Curve (Sample Efficiency)",
+    "text": "6. Learning Curve (Sample Efficiency)\nHow much training data do we really need?\n\nfractions = [0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80]\ntest_accs_by_size = []\n\nall_train_indices = list(train_ds.indices)\nnp.random.seed(42)\n\nfor frac in fractions:\n    n_sub = max(10, int(frac * n_train))\n    sub_idx = np.random.choice(all_train_indices, size=n_sub, replace=False).tolist()\n    sub_ds = Subset(dataset, sub_idx)\n    sub_loader = DataLoader(sub_ds, batch_size=32, shuffle=True)\n\n    m = nn.Sequential(nn.Linear(2, 32), nn.ReLU(), nn.Linear(32, 4))\n    opt = torch.optim.Adam(m.parameters(), lr=1e-3)\n    torch.manual_seed(0)\n    for _ in range(100):\n        m.train()\n        for xb, yb in sub_loader:\n            opt.zero_grad(); criterion(m(xb), yb).backward(); opt.step()\n\n    m.eval()\n    ta = 0.0\n    with torch.no_grad():\n        for xb, yb in test_loader:\n            ta += (m(xb).argmax(1) == yb).float().sum().item()\n    test_accs_by_size.append(ta / n_test)\n    print(f\"  {int(frac*100):3d}% training ({n_sub:4d} samples) → test acc: {ta/n_test:.3f}\")\n\nplt.figure(figsize=(7, 4))\nplt.plot([int(f * n_train) for f in fractions], test_accs_by_size, 'o-')\nplt.xlabel(\"Number of training samples\")\nplt.ylabel(\"Test accuracy\")\nplt.title(\"Learning Curve\")\nplt.grid(True); plt.tight_layout(); plt.show()\n\n   10% training (  75 samples) → test acc: 0.547\n   20% training ( 150 samples) → test acc: 0.568\n   30% training ( 225 samples) → test acc: 0.558\n   40% training ( 300 samples) → test acc: 0.558\n   50% training ( 375 samples) → test acc: 0.547\n   60% training ( 450 samples) → test acc: 0.568\n   70% training ( 525 samples) → test acc: 0.558\n   80% training ( 600 samples) → test acc: 0.547"
+  },
+  {
+    "objectID": "notebooks/MG/week08_regression_nanoindentation.html#exercises",
+    "href": "notebooks/MG/week08_regression_nanoindentation.html#exercises",
+    "title": "MG Week 8: Generalization and Learning Curves",
+    "section": "Exercises",
+    "text": "Exercises\n\nFrom the learning curve, what minimum number of training samples achieves &gt;90% test accuracy?\nCompare the MLP decision boundary to k-NN: from sklearn.neighbors import KNeighborsClassifier. Fit k-NN with k=5 on the same training data and visualize its boundary — is it smoother or rougher than the MLP?\nThe test set should be held out until the very end. Why is it wrong to use test accuracy to tune hyperparameters (like hidden layer size)? Redesign the experiment to properly use only train and val for model selection."
+  },
+  {
+    "objectID": "notebooks/MG/week11_latent_ising.html",
+    "href": "notebooks/MG/week11_latent_ising.html",
+    "title": "MG Week 11: Latent Space and Phase Transitions",
+    "section": "",
+    "text": "Open In Colab"
+  },
+  {
+    "objectID": "notebooks/MG/week11_latent_ising.html#learning-objectives",
+    "href": "notebooks/MG/week11_latent_ising.html#learning-objectives",
+    "title": "MG Week 11: Latent Space and Phase Transitions",
+    "section": "Learning Objectives",
+    "text": "Learning Objectives\n\nUnderstand latent spaces as learned low-dimensional representations\nConnect the 2D latent space structure to physical phase behavior\nRecognize that autoencoders can discover order parameters without supervision"
+  },
+  {
+    "objectID": "notebooks/MG/week11_latent_ising.html#setup",
+    "href": "notebooks/MG/week11_latent_ising.html#setup",
+    "title": "MG Week 11: Latent Space and Phase Transitions",
+    "section": "Setup",
+    "text": "Setup\n\n!pip install git+https://github.com/ECLIPSE-Lab/Ai4MatLectures.git \"mdsdata&gt;=0.1.5\"\n\n\nimport torch\nimport torch.nn as nn\nfrom torch.utils.data import DataLoader, random_split\nfrom ai4mat.datasets import IsingDataset\nimport matplotlib.pyplot as plt\nimport numpy as np"
+  },
+  {
+    "objectID": "notebooks/MG/week11_latent_ising.html#load-the-data",
+    "href": "notebooks/MG/week11_latent_ising.html#load-the-data",
+    "title": "MG Week 11: Latent Space and Phase Transitions",
+    "section": "1. Load the Data",
+    "text": "1. Load the Data\n\ndataset = IsingDataset(size='light')\nprint(f\"Dataset size: {len(dataset)}\")\nx0, y0 = dataset[0]\nprint(f\"Sample x shape: {x0.shape}  (1, 16, 16)\")\nprint(f\"Sample y: {y0}  (0 = T &gt; Tc disordered, 1 = T &lt; Tc ordered)\")\n\ny_all_check = torch.tensor([dataset[i][1].item() for i in range(len(dataset))])\nprint(f\"Class balance: {(y_all_check == 0).sum().item()} disordered, {(y_all_check == 1).sum().item()} ordered\")\n\nDataset size: 5000\nSample x shape: torch.Size([1, 16, 16])  (1, 16, 16)\nSample y: 1  (0 = T &gt; Tc disordered, 1 = T &lt; Tc ordered)\nClass balance: 2507 disordered, 2493 ordered\n\n\n\nfig, axes = plt.subplots(2, 5, figsize=(14, 6))\nfor i, ax in enumerate(axes.flat):\n    idx = i * (len(dataset) // 10)\n    img = dataset[idx][0].squeeze().numpy()\n    label = dataset[idx][1].item()\n    ax.imshow(img, cmap='gray', vmin=0, vmax=1)\n    ax.set_title(f\"{'Ordered' if label==1 else 'Disordered'}\", fontsize=8)\n    ax.axis('off')\nplt.suptitle(\"Ising spin configurations (16×16)\")\nplt.tight_layout()\nplt.show()"
+  },
+  {
+    "objectID": "notebooks/MG/week11_latent_ising.html#trainval-split",
+    "href": "notebooks/MG/week11_latent_ising.html#trainval-split",
+    "title": "MG Week 11: Latent Space and Phase Transitions",
+    "section": "2. Train/Val Split",
+    "text": "2. Train/Val Split\n\nn_train = int(0.8 * len(dataset))\nn_val = len(dataset) - n_train\ntrain_ds, val_ds = random_split(dataset, [n_train, n_val])\n\ntrain_loader = DataLoader(train_ds, batch_size=64, shuffle=True)\nval_loader   = DataLoader(val_ds,   batch_size=64, shuffle=False)\nprint(f\"Train: {n_train} | Val: {n_val}\")\n\nTrain: 4000 | Val: 1000"
+  },
+  {
+    "objectID": "notebooks/MG/week11_latent_ising.html#define-the-autoencoder",
+    "href": "notebooks/MG/week11_latent_ising.html#define-the-autoencoder",
+    "title": "MG Week 11: Latent Space and Phase Transitions",
+    "section": "3. Define the Autoencoder",
+    "text": "3. Define the Autoencoder\nThe autoencoder is trained WITHOUT labels — it must reconstruct input images from a 2D bottleneck. The latent space emerges from the structure in the data.\n\nclass ConvAutoencoder(nn.Module):\n    def __init__(self, latent_dim=2):\n        super().__init__()\n        self.encoder = nn.Sequential(\n            nn.Conv2d(1, 16, 3, stride=2, padding=1),   # 8x8\n            nn.ReLU(),\n            nn.Conv2d(16, 32, 3, stride=2, padding=1),  # 4x4\n            nn.ReLU(),\n            nn.Flatten(),\n            nn.Linear(32 * 4 * 4, latent_dim)\n        )\n        self.decoder = nn.Sequential(\n            nn.Linear(latent_dim, 32 * 4 * 4),\n            nn.ReLU(),\n            nn.Unflatten(1, (32, 4, 4)),\n            nn.ConvTranspose2d(32, 16, 3, stride=2, padding=1, output_padding=1),  # 8x8\n            nn.ReLU(),\n            nn.ConvTranspose2d(16, 1, 3, stride=2, padding=1, output_padding=1),   # 16x16\n            nn.Sigmoid()\n        )\n\n    def forward(self, x):\n        z = self.encoder(x)\n        return self.decoder(z), z\n\nmodel = ConvAutoencoder(latent_dim=2)\nn_params = sum(p.numel() for p in model.parameters())\nprint(f\"Autoencoder parameters: {n_params:,}\")\n\n# Verify shapes\nx_test = torch.zeros(4, 1, 16, 16)\nx_recon, z = model(x_test)\nprint(f\"Input:   {x_test.shape}\")\nprint(f\"Latent:  {z.shape}\")\nprint(f\"Output:  {x_recon.shape}\")\n\nAutoencoder parameters: 12,131\nInput:   torch.Size([4, 1, 16, 16])\nLatent:  torch.Size([4, 2])\nOutput:  torch.Size([4, 1, 16, 16])"
+  },
+  {
+    "objectID": "notebooks/MG/week11_latent_ising.html#training-loop",
+    "href": "notebooks/MG/week11_latent_ising.html#training-loop",
+    "title": "MG Week 11: Latent Space and Phase Transitions",
+    "section": "4. Training Loop",
+    "text": "4. Training Loop\n\ncriterion = nn.MSELoss()\noptimizer = torch.optim.Adam(model.parameters(), lr=1e-3)\n\ntrain_losses, val_losses = [], []\n\nfor epoch in range(20):\n    model.train()\n    ep_loss = 0.0\n    for x_batch, _ in train_loader:    # No labels used!\n        optimizer.zero_grad()\n        x_recon, _ = model(x_batch)\n        loss = criterion(x_recon, x_batch)\n        loss.backward()\n        optimizer.step()\n        ep_loss += loss.item() * len(x_batch)\n    train_losses.append(ep_loss / n_train)\n\n    model.eval()\n    v_loss = 0.0\n    with torch.no_grad():\n        for x_batch, _ in val_loader:\n            x_recon, _ = model(x_batch)\n            v_loss += criterion(x_recon, x_batch).item() * len(x_batch)\n    val_losses.append(v_loss / n_val)\n\n    if (epoch + 1) % 5 == 0:\n        print(f\"Epoch {epoch+1:3d} | Train MSE: {train_losses[-1]:.4f} | Val MSE: {val_losses[-1]:.4f}\")\n\nplt.plot(train_losses, label='Train MSE')\nplt.plot(val_losses,   label='Val MSE')\nplt.xlabel(\"Epoch\"); plt.ylabel(\"Reconstruction MSE\")\nplt.title(\"Autoencoder Training\"); plt.legend()\nplt.tight_layout(); plt.show()\n\nEpoch   5 | Train MSE: 0.1971 | Val MSE: 0.1973\nEpoch  10 | Train MSE: 0.1952 | Val MSE: 0.1963\nEpoch  15 | Train MSE: 0.1944 | Val MSE: 0.1963\nEpoch  20 | Train MSE: 0.1941 | Val MSE: 0.1962"
+  },
+  {
+    "objectID": "notebooks/MG/week11_latent_ising.html#latent-space-visualization",
+    "href": "notebooks/MG/week11_latent_ising.html#latent-space-visualization",
+    "title": "MG Week 11: Latent Space and Phase Transitions",
+    "section": "5. Latent Space Visualization",
+    "text": "5. Latent Space Visualization\n\n# Encode all data\nall_z, all_labels = [], []\nmodel.eval()\nfull_loader = DataLoader(dataset, batch_size=64, shuffle=False)\nwith torch.no_grad():\n    for x_batch, y_batch in full_loader:\n        _, z = model(x_batch)\n        all_z.append(z.numpy())\n        all_labels.append(y_batch.numpy())\n\nall_z = np.concatenate(all_z, axis=0)\nall_labels = np.concatenate(all_labels, axis=0)\n\nfig, ax = plt.subplots(figsize=(7, 6))\nfor cls, name, color in [(0, \"Disordered (T &gt; Tc)\", \"tab:blue\"),\n                          (1, \"Ordered   (T &lt; Tc)\", \"tab:red\")]:\n    mask = all_labels == cls\n    ax.scatter(all_z[mask, 0], all_z[mask, 1], alpha=0.35, s=12,\n               color=color, label=name)\n\nax.set_xlabel(\"Latent dim 1\")\nax.set_ylabel(\"Latent dim 2\")\nax.set_title(\"2D Latent Space — colored by Ising phase\")\nax.legend()\nplt.tight_layout()\nplt.show()\n\nprint(\"Key observation: the AE was trained with NO phase labels.\")\nprint(\"Yet the latent space has discovered a representation that separates\")\nprint(\"the two phases — essentially learning the magnetic order parameter!\")\n\n\n\n\n\n\n\n\nKey observation: the AE was trained with NO phase labels.\nYet the latent space has discovered a representation that separates\nthe two phases — essentially learning the magnetic order parameter!\n\n\n\n# Reconstruct some images\nfig, axes = plt.subplots(2, 8, figsize=(16, 4))\nx_show = torch.stack([val_ds[i][0] for i in range(8)])\nwith torch.no_grad():\n    x_recon, _ = model(x_show)\nfor i in range(8):\n    axes[0, i].imshow(x_show[i].squeeze().numpy(), cmap='gray', vmin=0, vmax=1)\n    axes[1, i].imshow(x_recon[i].squeeze().numpy(), cmap='gray', vmin=0, vmax=1)\n    axes[0, i].axis('off'); axes[1, i].axis('off')\naxes[0, 0].set_ylabel(\"Original\",     fontsize=9)\naxes[1, 0].set_ylabel(\"Reconstructed\", fontsize=9)\nplt.suptitle(\"Original vs. Reconstructed Ising Configurations\")\nplt.tight_layout(); plt.show()"
+  },
+  {
+    "objectID": "notebooks/MG/week11_latent_ising.html#physics-connection",
+    "href": "notebooks/MG/week11_latent_ising.html#physics-connection",
+    "title": "MG Week 11: Latent Space and Phase Transitions",
+    "section": "Physics Connection",
+    "text": "Physics Connection\n\nprint(\"The Ising model undergoes a phase transition at the Curie temperature Tc.\")\nprint()\nprint(\"Below Tc (label=1): spins align → ferromagnetic order → high magnetization\")\nprint(\"Above Tc (label=0): spins random → paramagnetic → zero net magnetization\")\nprint()\nprint(\"The order parameter for this transition is the magnetization M = &lt;σ&gt;.\")\nprint()\nprint(\"Our autoencoder — trained purely to reconstruct images — has implicitly\")\nprint(\"learned a 2D representation where the two phases are spatially separated.\")\nprint(\"This is a remarkable example of unsupervised discovery of physical structure!\")\n\nThe Ising model undergoes a phase transition at the Curie temperature Tc.\n\nBelow Tc (label=1): spins align → ferromagnetic order → high magnetization\nAbove Tc (label=0): spins random → paramagnetic → zero net magnetization\n\nThe order parameter for this transition is the magnetization M = &lt;σ&gt;.\n\nOur autoencoder — trained purely to reconstruct images — has implicitly\nlearned a 2D representation where the two phases are spatially separated.\nThis is a remarkable example of unsupervised discovery of physical structure!"
+  },
+  {
+    "objectID": "notebooks/MG/week11_latent_ising.html#exercises",
+    "href": "notebooks/MG/week11_latent_ising.html#exercises",
+    "title": "MG Week 11: Latent Space and Phase Transitions",
+    "section": "Exercises",
+    "text": "Exercises\n\nTry latent_dim=1. Can a single latent coordinate still separate the two phases? Plot the 1D latent values colored by label.\nTry latent_dim=4. Visualize the 4D latent space by projecting to 2D with PCA: from sklearn.decomposition import PCA; z_2d = PCA(2).fit_transform(all_z). Does the phase separation persist?\nTry latent space interpolation: pick two latent codes from opposite phases, interpolate 10 steps linearly, decode each, and plot. What does the reconstructed image look like in between the two phases?"
+  }
+]
