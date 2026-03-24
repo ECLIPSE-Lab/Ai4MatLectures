@@ -1,0 +1,41 @@
+---
+title: "Ai4MatLectures"
+subtitle: "PyTorch teaching notebooks for materials science"
+---
+
+Teaching notebooks for the ECLIPSE Lab lecture triad at FAU Erlangen-Nürnberg.
+Install the package:
+
+```bash
+pip install git+https://github.com/ECLIPSE-Lab/Ai4MatLectures.git "mdsdata>=0.1.5"
+```
+
+## MFML — Mathematical Foundations of AI & ML
+
+| Week | Topic | Dataset | Notebook |
+|---|---|---|---|
+| 3 | Regression from scratch | Tensile Test | [week03_regression_tensile](notebooks/MFML/week03_regression_tensile.html) |
+| 4 | First nn.Module classifier | Iris | [week04_classifier_iris](notebooks/MFML/week04_classifier_iris.html) |
+| 5 | Manual backprop | Alpaydin Digits | [week05_backprop_digits](notebooks/MFML/week05_backprop_digits.html) |
+| 7 | Overfitting & regularization | Ising light | [week07_overfitting_ising_light](notebooks/MFML/week07_overfitting_ising_light.html) |
+| 10 | Autoencoder latent space | Ising full | [week10_autoencoder_ising_full](notebooks/MFML/week10_autoencoder_ising_full.html) |
+| 11 | Unsupervised clustering | Nanoindentation | [week11_clustering_nanoindentation](notebooks/MFML/week11_clustering_nanoindentation.html) |
+
+## MLPC — ML in Materials Processing & Characterization
+
+| Week | Topic | Dataset | Notebook |
+|---|---|---|---|
+| 4 | Baseline before CNNs | Alpaydin Digits | [week04_baseline_digits](notebooks/MLPC/week04_baseline_digits.html) |
+| 5 | First CNN | Ising light | [week05_cnn_ising_light](notebooks/MLPC/week05_cnn_ising_light.html) |
+| 5 | Full CNN training | Ising full | [week05_cnn_ising_full](notebooks/MLPC/week05_cnn_ising_full.html) |
+| 7 | Process monitoring | Tensile Test | [week07_process_monitoring_tensile](notebooks/MLPC/week07_process_monitoring_tensile.html) |
+| 11 | Anomaly detection via AE | Cahn-Hilliard | [week11_anomaly_cahn_hilliard](notebooks/MLPC/week11_anomaly_cahn_hilliard.html) |
+
+## MG — Materials Genomics
+
+| Week | Topic | Dataset | Notebook |
+|---|---|---|---|
+| 5 | Descriptors + regression | Chemical Elements | [week05_descriptors_elements](notebooks/MG/week05_descriptors_elements.html) |
+| 8 | Regression & generalization | Nanoindentation | [week08_regression_nanoindentation](notebooks/MG/week08_regression_nanoindentation.html) |
+| 11 | Latent space (Ising) | Ising light | [week11_latent_ising](notebooks/MG/week11_latent_ising.html) |
+| 11 | Materials latent space | Cahn-Hilliard | [week11_latent_cahn_hilliard](notebooks/MG/week11_latent_cahn_hilliard.html) |

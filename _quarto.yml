@@ -1,0 +1,20 @@
+project:
+  type: website
+  output-dir: _site
+
+website:
+  title: "Ai4MatLectures"
+  navbar:
+    left:
+      - href: index.qmd
+        text: Home
+
+execute:
+  freeze: auto
+  python: true
+
+format:
+  html:
+    theme: cosmo
+    toc: true
+    code-fold: false
