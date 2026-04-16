@@ -592,8 +592,8 @@ cx_mouth, cy_mouth = 128, 128
 dx_mouth = x - cx_mouth
 dy_mouth = y - cy_mouth
 
-radius_mouth = np.sqrt(dx_mouth**2 + dy_mouth**2)
-angle_mouth = np.degrees(np.arctan2(dy_mouth, dx_mouth))  # in [-180, 180]
+radius_mouth = 0 # write the expression, such that radius_mouth is in [60, 70]
+angle_mouth = 0 # write the expression, such that angle_mouth is in [-180, 180]
 
 plt.figure(figsize=(6, 5))
 plt.imshow(angle_mouth, cmap='twilight', origin='lower')
@@ -604,17 +604,13 @@ plt.show()
 
 
 # Left half-plane corresponds to angles 90..180 and -180..-90 (90..270 in [0,360) terms)
-mouth_mask = (
-    (radius_mouth >= 60)
-    & (radius_mouth <= 70)
-    & ((angle_mouth >= -10) | (angle_mouth <= -170))
-)
+mouth_mask = 0 # write the expression, such that mouth_mask is True for the mouth arc
 image[mouth_mask] = 1.0
 
 # Step 3: Draw two filled circular eyes
 r_eye = 10
-left_eye_mask = (x - 100)**2 + (y - 100)**2 <= r_eye**2
-right_eye_mask = (x - 160)**2 + (y - 100)**2 <= r_eye**2
+left_eye_mask = 0 # write the expression, such that left_eye_mask is True for the left eye
+right_eye_mask = 0 # write the expression, such that right_eye_mask is True for the right eye
 image[left_eye_mask] = 1.0
 image[right_eye_mask] = 1.0
 
@@ -626,7 +622,7 @@ plt.axis('off')
 plt.savefig("smiley.png", bbox_inches='tight')
 plt.show()
 # Save the image as a binary .npy file for comparison
-np.save("smiley_gt.npy", image)
+ 
 
 # Example assert for students: their_image should be equal to the ground truth binary file
 # Uncomment and use this line after students generate their own image array named `their_image`
