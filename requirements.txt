@@ -8,3 +8,5 @@ pandas>=2.1
 tqdm>=4.66
 jupyter>=1.0
 nbconvert>=7.0
+imageio>=2.34
+scikit-learn>=1.4
