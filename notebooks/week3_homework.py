@@ -157,3 +157,85 @@ print(f"final val   MSE = {val_losses[-1]:.2f}")
 # Hold on to the train/val MSE numbers above — Block 1 of the in-class notebook
 # will check that closed-form OLS lands on the same answer to within numerical
 # precision.
+
+
+# %% [markdown]
+# # Part B — FFT as a basis-function expansion
+#
+# **Question:** if a "linear" model is allowed any basis we like, what does it
+# look like to choose the **Fourier basis**?
+#
+# **Answer:** for a periodic signal sampled at $N$ points, the discrete Fourier
+# transform is *exactly* the least-squares projection onto the basis
+# $\{\sin(2\pi k t / T),\ \cos(2\pi k t / T)\}_{k=0}^{N/2}$.
+#
+# The FFT is therefore "linear regression on the Fourier basis", computed in
+# $\mathcal{O}(N \log N)$ instead of $\mathcal{O}(N^3)$. Below we make this
+# concrete on a noisy two-tone signal.
+
+# %%
+# Synthetic signal: two pure tones plus white noise.
+fs = 1000.0                           # sampling rate, Hz
+T  = 1.0                              # 1 second of data
+t  = np.arange(0, T, 1/fs)            # (N,)
+N  = t.size
+
+f1, f2 = 50.0, 120.0                  # the two true frequencies
+clean  = 1.0*np.sin(2*np.pi*f1*t) + 0.5*np.sin(2*np.pi*f2*t)
+noise  = np.random.default_rng(0).normal(0.0, 0.4, size=N)
+signal = clean + noise
+
+fig, ax = plt.subplots(2, 1, figsize=(10, 4.5), sharex=True)
+ax[0].plot(t[:200], clean[:200],  'k', lw=1, label="clean")
+ax[0].set_ylabel("clean"); ax[0].legend()
+ax[1].plot(t[:200], signal[:200], 'tab:blue', lw=1, label="noisy (what we get)")
+ax[1].set_xlabel("time (s)"); ax[1].set_ylabel("noisy"); ax[1].legend()
+plt.tight_layout(); plt.show()
+
+
+# %%
+# FFT magnitude spectrum.
+S = np.fft.rfft(signal)
+freqs = np.fft.rfftfreq(N, 1/fs)
+mag = np.abs(S) / N
+
+plt.figure(figsize=(8, 3.5))
+plt.stem(freqs, mag, basefmt=" ")
+plt.xlim(0, 200); plt.xlabel("frequency (Hz)"); plt.ylabel("|S(f)| / N")
+plt.title("Fourier spectrum — two clear peaks at the true frequencies")
+plt.axvline(f1, color='r', linestyle='--', alpha=0.4)
+plt.axvline(f2, color='r', linestyle='--', alpha=0.4)
+plt.grid(alpha=0.3); plt.tight_layout(); plt.show()
+
+
+# %%
+# Reconstruct from the top-k Fourier coefficients (a.k.a. low-rank denoising in
+# the Fourier basis -- exactly the SVD truncation idea from week 2, with the
+# basis fixed in advance).
+def topk_reconstruct(signal, k):
+    S = np.fft.rfft(signal)
+    keep = np.argsort(np.abs(S))[-k:]      # indices of the k largest coefficients
+    S_trunc = np.zeros_like(S)
+    S_trunc[keep] = S[keep]
+    return np.fft.irfft(S_trunc, n=signal.size)
+
+ks = [2, 4, 8, 32]
+fig, ax = plt.subplots(len(ks), 1, figsize=(10, 6), sharex=True)
+for a, k in zip(ax, ks):
+    rec = topk_reconstruct(signal, k)
+    a.plot(t[:200], clean[:200],  'k', lw=1, alpha=0.6, label="clean")
+    a.plot(t[:200], rec[:200],    'tab:red', lw=1, label=f"top-{k} Fourier")
+    a.legend(loc='upper right'); a.set_ylabel(f"k={k}")
+ax[-1].set_xlabel("time (s)")
+plt.tight_layout(); plt.show()
+
+
+# %% [markdown]
+# **Reading the picture:** keep the top 2 Fourier coefficients and you already
+# recover the two-tone signal almost perfectly — because the *true* signal
+# *is* rank-2 in the Fourier basis. A polynomial fit would need many more
+# parameters to do this, because polynomials are a *bad* basis for periodic
+# data.
+#
+# **Take-away:** *which* basis you pick is itself a modelling choice. Pick the
+# one whose coefficients are sparse for your signal class.
