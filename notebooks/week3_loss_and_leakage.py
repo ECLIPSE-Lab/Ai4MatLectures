@@ -61,37 +61,54 @@ def standardise(z):
 
 # %%
 ds = TensileTestDataset(temperature=600)
-X = ds.X.squeeze(1)        # (350,) strain
-y = ds.y                   # (350,) stress
+X = ds.X.squeeze(1)        # (350,) strain (raw units, ~1e-2)
+y = ds.y                   # (350,) stress (raw units, MPa, ~10)
 
-# Closed-form OLS using the design matrix [strain, 1].
-A = torch.stack([X, torch.ones_like(X)], dim=1)        # (350, 2)
-result = torch.linalg.lstsq(A, y.unsqueeze(1))         # solves min || A w - y ||^2
-w_ols = result.solution.squeeze()                      # (2,) -> [slope, intercept]
-print(f"OLS closed form:  slope = {w_ols[0]:8.3f}    intercept = {w_ols[1]:8.3f}")
+# Standardise both before we compare optimizers. Otherwise SGD's single learning
+# rate would have to handle a feature with std ~0.005 and a target with std ~10
+# in the same step — which doesn't work without per-parameter preconditioning.
+# Block 2 fits in the same standardised space, so this also keeps the two blocks
+# consistent.
+Xn, mu_x, sd_x = standardise(X)
+yn, mu_y, sd_y = standardise(y)
 
 
 # %%
-# SGD as in the homework, but trained long enough to converge to OLS.
+# Closed-form OLS in standardised space, using design matrix [Xn, 1].
+A = torch.stack([Xn, torch.ones_like(Xn)], dim=1)      # (350, 2)
+result = torch.linalg.lstsq(A, yn.unsqueeze(1))        # solves min || A w - yn ||^2
+w_ols = result.solution.squeeze()                      # (2,) -> [slope_std, intercept_std]
+print(f"OLS closed form (std): slope = {w_ols[0]:7.4f}    intercept = {w_ols[1]:7.4f}")
+
+
+# %%
+# SGD as in the homework, trained long enough on the standardised data to converge.
 torch.manual_seed(0)
 model = nn.Linear(1, 1)
-opt = torch.optim.SGD(model.parameters(), lr=1e-4)
+opt = torch.optim.SGD(model.parameters(), lr=1e-2)
 loss_fn = nn.MSELoss()
 
-X_col = X.unsqueeze(1)
+Xn_col = Xn.unsqueeze(1)
 for epoch in range(2000):
     opt.zero_grad()
-    yhat = model(X_col).squeeze(1)
-    loss = loss_fn(yhat, y)
+    yhat = model(Xn_col).squeeze(1)
+    loss = loss_fn(yhat, yn)
     loss.backward()
     opt.step()
 
 w_sgd = torch.tensor([model.weight.item(), model.bias.item()])
-print(f"SGD after 2000 ep: slope = {w_sgd[0]:8.3f}    intercept = {w_sgd[1]:8.3f}")
-print(f"||w_sgd - w_ols||_2 = {(w_sgd - w_ols).norm().item():.4f}")
+print(f"SGD after 2000 ep    : slope = {w_sgd[0]:7.4f}    intercept = {w_sgd[1]:7.4f}")
+print(f"||w_sgd - w_ols||_2 = {(w_sgd - w_ols).norm().item():.6f}")
 
 
 # %% [markdown]
-# The two should agree to a couple of decimal places. SGD is *just* an iterative way
-# to find what the closed form gives in one matrix solve. We will use this fact to
-# benchmark every other optimizer in Block 2.
+# The two should agree to ~5 decimal places. SGD is *just* an iterative way to find
+# what the closed form gives in one matrix solve. We will use this fact to benchmark
+# every other optimizer in Block 2 (which also fits in standardised coordinates).
+#
+# **Why standardise?** With the raw stress range of ~30 MPa and the raw strain range
+# of ~0.02, the design matrix is staggeringly ill-conditioned — full-batch GD on the
+# raw data with any single learning rate moves the slope and intercept at vastly
+# different speeds. Standardisation puts both features on the same scale so a single
+# `lr` works for both. This is the same "always standardise before fitting" lesson
+# from ML-PC §13–§14 — the cost of skipping it is not bias but **trainability**.
