@@ -277,7 +277,7 @@ y_dirty[outlier_idx] += torch.empty(n_outliers).uniform_(300.0, 600.0)
 # `lr` works on the raw stress / strain scale (the design matrix is hopelessly
 # ill-conditioned in raw units; see Block 1's "Why standardise?" sidebar).
 # Adam is forward-pointed in MFML §"beyond vanilla SGD".
-def fit_with_loss(loss_module, n_iters=2000, lr=1.0):
+def fit_with_loss(loss_module, n_iters=2000, lr=3.0):
     torch.manual_seed(0)
     m = nn.Linear(1, 1)
     opt = torch.optim.Adam(m.parameters(), lr=lr)
