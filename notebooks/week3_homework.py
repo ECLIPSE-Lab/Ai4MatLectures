@@ -239,3 +239,93 @@ plt.tight_layout(); plt.show()
 #
 # **Take-away:** *which* basis you pick is itself a modelling choice. Pick the
 # one whose coefficients are sparse for your signal class.
+
+# %% [markdown]
+# # Part C — Wavelets: when the basis must be **local**
+#
+# The FFT reads a signal as an infinite stack of pure sines. That works perfectly
+# when the signal is genuinely periodic. But what if the interesting event is a
+# **transient burst** at one moment in time — a defect avalanche, a phase pop, a
+# delamination click? Sines are infinite in time; they cannot localise a burst.
+#
+# Wavelets are a **localised** basis: each wavelet has both a frequency and a
+# location. The continuous wavelet transform (CWT) gives you a 2-D
+# **scalogram** of "how much of frequency $f$ is present at time $t$".
+
+# %%
+# Install the wavelet library (uncomment if running in a fresh env or Colab).
+# !pip install pywavelets
+
+import pywt   # noqa: E402
+
+# %%
+# Synthetic signal: low-frequency carrier + a Gaussian-windowed high-frequency burst.
+# Variables here are namespaced with `_c` so they don't shadow Part B's `t`, `fs`, `signal`, `S`.
+t_c  = np.linspace(0, 1.0, 2000)
+fs_c = 1.0 / (t_c[1] - t_c[0])
+
+carrier  = np.sin(2*np.pi*5*t_c)                                         # 5 Hz background
+burst    = np.exp(-((t_c - 0.65)/0.02)**2) * np.sin(2*np.pi*80*t_c)      # 80 Hz pulse @ t=0.65s
+signal_c = carrier + burst
+
+plt.figure(figsize=(10, 2.8))
+plt.plot(t_c, signal_c, 'k', lw=0.8); plt.xlabel("time (s)"); plt.ylabel("signal")
+plt.title("Carrier + transient burst — find the burst!"); plt.tight_layout(); plt.show()
+
+
+# %%
+# FFT view: the burst smears across the spectrum.
+S_c = np.fft.rfft(signal_c)
+freqs_c = np.fft.rfftfreq(t_c.size, 1/fs_c)
+plt.figure(figsize=(8, 3))
+plt.semilogy(freqs_c, np.abs(S_c))
+plt.xlim(0, 150); plt.xlabel("frequency (Hz)"); plt.ylabel("|S(f)|")
+plt.title("FFT spectrum: the 5 Hz carrier dominates; the burst is a small bump near 80 Hz")
+plt.grid(alpha=0.3); plt.tight_layout(); plt.show()
+
+
+# %%
+# CWT view: the burst pops out at exactly the right (time, frequency).
+scales = np.arange(1, 64)
+coeffs, freqs_cwt = pywt.cwt(signal_c, scales=scales, wavelet="morl", sampling_period=1/fs_c)
+
+plt.figure(figsize=(10, 4))
+plt.imshow(np.abs(coeffs),
+           aspect="auto", origin="lower",
+           extent=[t_c[0], t_c[-1], freqs_cwt[-1], freqs_cwt[0]],
+           cmap="viridis")
+plt.xlabel("time (s)"); plt.ylabel("frequency (Hz)")
+plt.title("Continuous wavelet scalogram — bright blob = burst at (t≈0.65 s, f≈80 Hz)")
+plt.colorbar(label="|W(t, f)|"); plt.tight_layout(); plt.show()
+
+
+# %% [markdown]
+# Same data, two bases: the FFT *fails* to point at when the burst happens; the
+# wavelet basis *succeeds* because it is built from time-localised atoms.
+#
+# **Take-away:** *the right basis is the one whose atoms look like the structure
+# you are trying to detect.* Polynomials for smooth trends, sines for periodic
+# signals, wavelets for transients — and in class on Thursday, splines and RBFs
+# for "curvy but not periodic" things like a stress–strain curve.
+
+# %% [markdown]
+# # Part D — Reflection (write your answer in the cell below)
+#
+# In ≤ 5 sentences, answer:
+#
+# > In Part A you fit a model with `nn.Linear(1, 1)` and called it "linear regression."
+# > In Part B you fit a model whose basis is $\{1, \sin(2\pi f_1 t), \cos(2\pi f_1 t), ...\}$
+# > and *also* called it linear regression. In Part C the wavelet transform
+# > looked very different from either — yet a model that uses the top-k wavelet
+# > coefficients as predictors is *still* linear regression. **In what precise
+# > sense?** Write your own definition of "linear" that makes all three of these
+# > the same kind of model.
+#
+# We will collect a few of these on Thursday and refine the wording together.
+
+# %%
+# Your reflection (3-5 sentences, in a triple-quoted string is fine):
+reflection = """
+WRITE YOUR ANSWER HERE.
+"""
+print(reflection)
