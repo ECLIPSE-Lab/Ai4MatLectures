@@ -290,6 +290,11 @@ def fit_with_loss(loss_module, n_iters=2000, lr=3.0):
     return m
 
 m_mse   = fit_with_loss(nn.MSELoss())
+# delta=10 sits just above the typical inlier residual scale (~5 MPa) and well
+# below the outlier injections (300+ MPa). So inliers stay in the quadratic
+# regime and outliers in the linear regime — exactly the split Huber is built
+# to make. Picking delta is data-dependent: too small acts like MAE, too large
+# acts like MSE.
 m_huber = fit_with_loss(nn.HuberLoss(delta=10.0))
 m_mae   = fit_with_loss(nn.L1Loss())
 
@@ -306,7 +311,7 @@ yh_ref = (w_ref[0] * xs_grid.squeeze() + w_ref[1]).numpy()
 
 print(f"slope (clean OLS):   {w_ref[0]:7.2f}")
 print(f"slope (MSE on dirty):  {m_mse.weight.item():7.2f}   <- pulled UP by outliers")
-print(f"slope (Huber on dirty):{m_huber.weight.item():7.2f}   <- close to clean OLS")
+print(f"slope (Huber on dirty):{m_huber.weight.item():7.2f}   <- much closer to clean OLS than MSE; still slightly biased")
 print(f"slope (MAE on dirty):  {m_mae.weight.item():7.2f}   <- median, not mean — different story (see take-away)")
 
 
@@ -319,15 +324,21 @@ ax[0].plot(xs_grid.numpy().squeeze(), yh_huber, label='Huber')
 ax[0].plot(xs_grid.numpy().squeeze(), yh_mae,   label='MAE (L1)')
 ax[0].set_xlabel('strain'); ax[0].set_ylabel('stress'); ax[0].legend(); ax[0].set_title('three losses, same dirty data')
 
-# Residual histograms tell the same story: MSE has a heavy tail because outliers dragged the fit.
+# Residual histograms — clip the x-axis to the inlier range so the outlier tail
+# doesn't squash everything into one bar at zero. The shifts among MSE / Huber /
+# MAE are visible only in the inlier band.
 with torch.no_grad():
     r_mse   = (y_dirty - m_mse(X_clean.unsqueeze(1)).squeeze(1)).numpy()
     r_huber = (y_dirty - m_huber(X_clean.unsqueeze(1)).squeeze(1)).numpy()
     r_mae   = (y_dirty - m_mae(X_clean.unsqueeze(1)).squeeze(1)).numpy()
-ax[1].hist(r_mse,   bins=30, alpha=0.5, label='MSE residuals')
-ax[1].hist(r_huber, bins=30, alpha=0.5, label='Huber residuals')
-ax[1].hist(r_mae,   bins=30, alpha=0.5, label='MAE residuals')
-ax[1].set_xlabel('residual'); ax[1].set_ylabel('count'); ax[1].legend(); ax[1].set_title('residual distributions')
+inlier_bins = np.linspace(-25, 25, 50)
+ax[1].hist(r_mse,   bins=inlier_bins, alpha=0.5, label='MSE residuals')
+ax[1].hist(r_huber, bins=inlier_bins, alpha=0.5, label='Huber residuals')
+ax[1].hist(r_mae,   bins=inlier_bins, alpha=0.5, label='MAE residuals')
+ax[1].axvline(0, color='k', lw=0.5, alpha=0.5)
+ax[1].set_xlim(-25, 25)
+ax[1].set_xlabel('residual (MPa, inlier band)'); ax[1].set_ylabel('count')
+ax[1].legend(); ax[1].set_title(f'residual distributions ({n_outliers} outlier residuals at ~+300..+500 not shown)')
 plt.tight_layout(); plt.show()
 
 
