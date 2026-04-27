@@ -383,7 +383,13 @@ plt.tight_layout(); plt.show()
 
 # %%
 def polynomial_basis(x, degree):
-    """Returns the design matrix [1, x, x^2, ..., x^degree], shape (N, degree+1)."""
+    """Returns the design matrix [1, x, x^2, ..., x^degree], shape (N, degree+1).
+
+    NOTE: for `degree > ~6`, the caller must rescale `x` to roughly [-1, 1]
+    first (see `to_unit` below) — otherwise high-degree columns underflow and
+    the design matrix becomes numerically rank-deficient. The function space
+    is unchanged by the rescaling.
+    """
     cols = [torch.ones_like(x)]
     for k in range(1, degree + 1):
         cols.append(x ** k)
@@ -407,7 +413,12 @@ def cubic_bspline_basis(x_np, n_knots):
     return torch.tensor(np.stack(cols, axis=1), dtype=torch.float32)
 
 def fit_basis(Phi, y):
-    """Closed-form least squares: w = (Phi^T Phi)^-1 Phi^T y."""
+    """Closed-form least squares via SVD (`torch.linalg.lstsq`).
+
+    Equivalent to `(Phi^T Phi)^-1 Phi^T y` when Phi has full column rank,
+    but uses the more stable SVD path so it gracefully handles rank-deficient
+    Phi (e.g. high-degree polynomial bases on ill-conditioned data).
+    """
     return torch.linalg.lstsq(Phi, y.unsqueeze(1)).solution.squeeze()
 
 
