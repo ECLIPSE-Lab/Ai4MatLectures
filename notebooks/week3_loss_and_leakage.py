@@ -688,3 +688,148 @@ assert max_gap >= 0.10, (
 # 3. Does the train fold contain information that postdates the test fold? *(5c)*
 #
 # If yes to any of them, your validation is leaking and your test-R² is fiction.
+
+# %% [markdown]
+# # Block 6 — Student exercises (~35 min)
+#
+# Attempt Exercises 1–3 in order. Exercise 4 is a stretch goal.
+#
+# Each exercise is annotated with the lecture learning outcome it tests, so you
+# can self-check what you understood.
+#
+# ---
+#
+# ## Exercise 1 — Outlier surgery, loss choice
+#
+# *Tests MFML LO4: pick the loss that matches the noise model.*
+#
+# A contaminated tensile-test dataset is provided as `X_clean, y_dirty` from
+# Block 3 — keep using those variables.
+#
+# **Tasks:**
+#
+# 1. Fit three models with `nn.MSELoss`, `nn.HuberLoss(delta=...)` (you choose
+#    the delta), and `nn.L1Loss`. Use the same training-loop scaffold as Block 3.
+# 2. Plot residual histograms for each model.
+# 3. Pick the loss whose residual histogram looks closest to a *zero-mean,
+#    light-tailed* distribution. Justify your pick in 2 sentences.
+# 4. State the value of `delta` you used for Huber and explain how you chose it.
+
+# %%
+# Your code for Exercise 1 goes here.
+# m_mse_ex1 = ...
+# m_huber_ex1 = ...
+# m_mae_ex1 = ...
+
+
+# %% [markdown]
+# ## Exercise 2 — Roll your own GroupKFold
+#
+# *Tests ML-PC LO: leakage-aware validation.*
+#
+# **Tasks:**
+#
+# 1. Write a function `my_group_kfold(groups)` that yields a sequence of
+#    `(train_idx, test_idx)` pairs, where each fold holds out exactly one group.
+#    Cap it at ≤ 20 lines.
+# 2. Apply it to the combined-temperature TensileTest data with `temperature` as
+#    the group; report the mean test-R² and compare against `sklearn.model_selection.GroupKFold`.
+# 3. Also report a plain random K-fold R² (k=5). The gap is your group-leakage
+#    measurement on this dataset.
+
+# %%
+# Your code for Exercise 2 goes here.
+# def my_group_kfold(groups):
+#     ...
+#
+# from sklearn.model_selection import GroupKFold  # for verification only
+# ...
+
+
+# %% [markdown]
+# ## Exercise 3 — Spline vs polynomial bias-variance
+#
+# *Tests MFML LO6: recognise Runge / choose between bases.*
+#
+# **Tasks:**
+#
+# 1. Use the 600 °C data only. Hold out the last 20% of (sorted-by-strain)
+#    points as a validation set.
+# 2. For polynomial degree $d \in \{1, 2, 3, 5, 8, 12, 15\}$, fit on the train
+#    half and record train-MSE and val-MSE.
+# 3. Repeat for cubic B-spline with `n_knots ∈ {3, 4, 6, 8, 12, 16}`.
+# 4. Plot both train-MSE and val-MSE on log-y, side by side for the two bases.
+# 5. Annotate on each plot: which region is bias-dominated, which is
+#    variance-dominated, and which is the sweet spot.
+
+# %%
+# Your code for Exercise 3 goes here.
+# degrees = [1, 2, 3, 5, 8, 12, 15]
+# n_knots = [3, 4, 6, 8, 12, 16]
+# ...
+
+
+# %% [markdown]
+# ## Exercise 4 (stretch) — Leakage detective
+#
+# *Tests ML-PC LO: leakage diagnosis on unseen data.*
+#
+# Load `data/week3_mystery.npz` — it contains three pre-built train/test splits
+# named `split_A`, `split_B`, `split_C`. Each is leaky in exactly one of the
+# three ways from Block 5 (preprocessing / group / temporal). Your job is to
+# diagnose which is which.
+#
+# **Tasks:**
+#
+# 1. For each split, fit any reasonable model and report train-R² and test-R².
+# 2. For each split, write down ONE diagnostic test that distinguishes its
+#    leakage type from the other two. Examples: "I'll plot the per-row temperature
+#    of train vs test", or "I'll re-fit after re-shuffling and see whether scores
+#    change."
+# 3. Run your diagnostics and write your guess for each split.
+# 4. **Only after writing your guess**, open `data/week3_mystery_solutions.txt`
+#    and confirm.
+
+# %%
+# Your code for Exercise 4 (stretch) goes here.
+# import numpy as np
+# z = np.load('../data/week3_mystery.npz')
+# for letter in ('A', 'B', 'C'):
+#     X_tr = z[f'split_{letter}_X_train']
+#     X_te = z[f'split_{letter}_X_test']
+#     y_tr = z[f'split_{letter}_y_train']
+#     y_te = z[f'split_{letter}_y_test']
+#     ...
+
+
+# %% [markdown]
+# # Wrap-up: the red thread, restated
+#
+# Today you saw the same data behave like a great success or a quiet failure
+# depending on two choices that have *nothing to do with the model architecture*:
+#
+# - **Which loss did you minimise?** Pick the one whose negative log-likelihood
+#   matches your noise model. MSE for Gaussian, Huber for "Gaussian with rare
+#   outliers", Poisson NLL for low-count data (week 2), MAE for "I really do
+#   want to minimise the median residual."
+# - **Which split did you evaluate on?** Random row-shuffle is a *dangerous
+#   default*. Ask: is preprocessing fitted on the train fold only? Are
+#   correlated rows (same specimen, same temperature, same instrument run)
+#   kept together? Does train-time precede test-time?
+#
+# **Forward-pointers (already on the syllabus):**
+#
+# - **MFML Unit 6** — full first-order optimization (momentum, Adam, conditioning).
+# - **MFML Unit 8** — full Bayesian / MAP picture; the loss-as-NLL framing made formal.
+# - **ML-PC week 5** — image segmentation metrics (Dice, IoU) — the categorical
+#   counterpart to today's MSE/MAE story.
+# - **ML-PC week 7** — process monitoring, where temporal splits are the default.
+# - **MFML Unit 12** — uncertainty (Bayesian regression, Gaussian processes) — replaces
+#   point estimates with posteriors; today's L2-regularisation already secretly
+#   put a Gaussian prior on the weights (MAP interpretation).
+#
+# **Things we deliberately *did not* cover today** (each has a home elsewhere):
+#
+# - GLM / exponential family / IRLS — see the GLM materials when they appear later.
+# - Differentiation as a transform — comes back in week 7.
+# - Probabilistic labels / inter-annotator variance — comes back in MFML Unit 12.
