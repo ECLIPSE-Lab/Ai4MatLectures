@@ -120,3 +120,130 @@ print(f"||w_sgd - w_ols||_2 = {(w_sgd - w_ols).norm().item():.6f}")
 # different speeds. Standardisation puts both features on the same scale so a single
 # `lr` works for both. This is the same "always standardise before fitting" lesson
 # from ML-PC §13–§14 — the cost of skipping it is not bias but **trainability**.
+# %% [markdown]
+# # Block 2 — Optimizer zoo on the same loss landscape
+#
+# Same data, same MSE, four optimizers:
+#
+# - **Full-batch GD** — uses every sample to compute one gradient.
+# - **SGD** — single sample per step.
+# - **Minibatch SGD** — the workhorse of modern deep learning.
+# - **Newton's method** — uses second derivatives. For a linear model + MSE the
+#   Hessian is constant and Newton lands on the OLS solution **in one step**.
+# - **L-BFGS** — a quasi-Newton method that approximates the Hessian from gradient
+#   history. PyTorch ships it as `torch.optim.LBFGS`.
+#
+# *(see MFML §"gradient descent" through §"Newton's method")*
+
+# %%
+# Reuse the standardised tensors Xn, yn from Block 1 -- same coordinate system.
+A_n = torch.stack([Xn, torch.ones_like(Xn)], dim=1)         # design matrix in standardised coords
+
+# Closed-form OLS in standardised coords -- the target every iterative method must hit.
+w_target = torch.linalg.lstsq(A_n, yn.unsqueeze(1)).solution.squeeze()
+
+
+def mse(w):
+    return ((A_n @ w - yn) ** 2).mean()
+
+def grad(w):
+    """Analytic gradient of (1/N) || A w - y ||^2 = (2/N) A^T (Aw - y)."""
+    N = A_n.shape[0]
+    return (2.0 / N) * A_n.t() @ (A_n @ w - yn)
+
+# The Hessian is constant for linear+MSE: (2/N) A^T A.
+H = (2.0 / A_n.shape[0]) * A_n.t() @ A_n
+H_inv = torch.linalg.inv(H)
+
+
+# %%
+# Run each optimizer for up to 200 steps; record ||w - w_target|| each step.
+def run_full_batch_gd(eta, n_steps=200):
+    w = torch.zeros(2)
+    hist = []
+    for _ in range(n_steps):
+        w = w - eta * grad(w)
+        hist.append((w - w_target).norm().item())
+    return hist
+
+def run_sgd(eta, n_steps=200):
+    """Pure stochastic: one random sample per step."""
+    rng = np.random.default_rng(0)
+    w = torch.zeros(2)
+    hist = []
+    N = A_n.shape[0]
+    for _ in range(n_steps):
+        i = int(rng.integers(N))
+        a_i = A_n[i:i+1]
+        y_i = yn[i:i+1]
+        g_i = 2.0 * a_i.t() @ (a_i @ w - y_i)
+        w = w - eta * g_i.squeeze()
+        hist.append((w - w_target).norm().item())
+    return hist
+
+def run_minibatch_sgd(eta, batch=32, n_steps=200):
+    rng = np.random.default_rng(0)
+    w = torch.zeros(2)
+    hist = []
+    N = A_n.shape[0]
+    for _ in range(n_steps):
+        idx = rng.choice(N, size=batch, replace=False)
+        Ab, yb = A_n[idx], yn[idx]
+        g_b = (2.0 / batch) * Ab.t() @ (Ab @ w - yb)
+        w = w - eta * g_b
+        hist.append((w - w_target).norm().item())
+    return hist
+
+def run_newton(n_steps=5):
+    w = torch.zeros(2)
+    hist = []
+    for _ in range(n_steps):
+        w = w - H_inv @ grad(w)
+        hist.append((w - w_target).norm().item())
+    return hist
+
+def run_lbfgs(n_steps=20):
+    w = torch.zeros(2, requires_grad=True)
+    opt = torch.optim.LBFGS([w], lr=1.0, max_iter=1, line_search_fn="strong_wolfe")
+    hist = []
+    def closure():
+        opt.zero_grad()
+        loss = mse(w)
+        loss.backward()
+        return loss
+    for _ in range(n_steps):
+        opt.step(closure)
+        hist.append((w.detach() - w_target).norm().item())
+    return hist
+
+
+hist_gd  = run_full_batch_gd(eta=0.5,    n_steps=200)
+hist_sgd = run_sgd(           eta=0.05,   n_steps=200)
+hist_mb  = run_minibatch_sgd( eta=0.5,    batch=32, n_steps=200)
+hist_nt  = run_newton(        n_steps=5)
+hist_lb  = run_lbfgs(         n_steps=20)
+
+plt.figure(figsize=(8, 4))
+plt.semilogy(hist_gd,  label='full-batch GD')
+plt.semilogy(hist_sgd, label='SGD (1 sample/step)')
+plt.semilogy(hist_mb,  label='minibatch SGD (b=32)')
+plt.semilogy(hist_nt,  'o-', label="Newton (5 steps)")
+plt.semilogy(hist_lb,  's-', label="L-BFGS (20 steps)")
+plt.xlabel("step"); plt.ylabel(r'$\| w - w_{OLS} \|_2$')
+plt.title("All five optimizers chasing the same OLS minimum")
+plt.legend(); plt.grid(alpha=0.3); plt.tight_layout(); plt.show()
+
+
+# %% [markdown]
+# Reading the plot:
+#
+# - **Newton lands in one step** because the loss is a quadratic, so the local
+#   second-order Taylor model is exact globally.
+# - **L-BFGS** also gets there fast, in ≤ 5 outer iterations.
+# - **Full-batch GD** decays geometrically — the rate is set by the condition number
+#   of the Hessian. With standardisation that condition number is ~1, so GD is fast too.
+# - **SGD** bounces around the minimum: the noise floor scales with $\eta$.
+# - **Minibatch SGD** is the practical compromise — averages out single-sample noise
+#   while still being one matrix-vector multiply per step.
+#
+# *(Forward-pointer: full optimization deep dive — momentum, Adam, conditioning — is MFML Unit 6.)*
