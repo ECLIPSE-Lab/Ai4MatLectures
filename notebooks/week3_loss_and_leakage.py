@@ -624,7 +624,9 @@ print(f"5c temporal        | honest (train→future) R^2 = {r2_honest_t:.3f}   l
 
 
 # %%
-# Bar chart: visual summary of all three demos.
+# Bar chart: visual summary of all three demos. Clip the y-axis to [-1, 1.05]
+# so the brutal group-leakage R² (around -4) doesn't crush the visual; the
+# negative bar is annotated so students still see how bad it is.
 labels = ['5a pre-proc', '5b group', '5c temporal']
 honest = [r2_honest_pp, r2_group_cv,  r2_honest_t]
 leaky  = [r2_leaky_pp,  r2_random_cv, r2_leaky_t]
@@ -635,7 +637,15 @@ plt.bar(xpos - 0.2, honest, width=0.4, label='honest')
 plt.bar(xpos + 0.2, leaky,  width=0.4, label='leaky')
 plt.xticks(xpos, labels); plt.ylabel(r'$R^2$ on test')
 plt.title("Three flavours of leakage — same model, same data, different verdicts")
-plt.axhline(0, color='k', lw=0.5); plt.legend(); plt.grid(axis='y', alpha=0.3); plt.tight_layout(); plt.show()
+plt.axhline(0, color='k', lw=0.5)
+plt.ylim(-1.0, 1.05)
+# Annotate any clipped bars with their actual value.
+for i, (h_val, l_val) in enumerate(zip(honest, leaky)):
+    if h_val < -1.0:
+        plt.text(i - 0.2, -0.95, f'{h_val:.2f}', ha='center', va='bottom', fontsize=8, color='white')
+    if l_val < -1.0:
+        plt.text(i + 0.2, -0.95, f'{l_val:.2f}', ha='center', va='bottom', fontsize=8, color='white')
+plt.legend(); plt.grid(axis='y', alpha=0.3); plt.tight_layout(); plt.show()
 
 max_gap = max(abs(l - h) for l, h in zip(leaky, honest))
 print(f"\nlargest leaky-vs-honest R^2 gap: {max_gap:.3f}")
@@ -646,9 +656,31 @@ assert max_gap >= 0.10, (
 
 
 # %% [markdown]
-# **The take-away.** Same model, same data, three different "test-R²" numbers
-# depending on the split. A model deployed on the basis of any one of these
-# leaky validation schemes would systematically under-perform in production.
+# **The take-away.** Same model, same data, three different verdicts.
+#
+# **Not all leakage flavours bite the same model equally.** Reading the bar chart:
+#
+# - **5a (pre-processing)** — for our linear-in-parameters spline, simple
+#   `(x - mean) / std` is *absorbed by the weights*: feature scaling is just an
+#   affine transform that the model can undo. So the gap is essentially zero.
+#   The classic preprocessing leak that DOES bite linear models is non-affine —
+#   PCA-fit on full data, percentile-clipping on full data, mean-imputation, or
+#   feature *selection* that uses the test set. The lesson stands: any
+#   preprocessing step that summarises the test fold leaks; whether your model
+#   notices depends on the model.
+# - **5b (group)** — *brutal*. Random K-fold across temperatures gives R² ≈ 0.89;
+#   honest leave-one-temperature-out gives R² strongly negative (~-4) because
+#   the model has never seen the held-out temperature and can't extrapolate.
+#   Every materials-science train/test split should ask: *what's the group
+#   variable my model is silently learning to memorise?* For us today it's
+#   temperature; in your work it might be specimen-id, instrument-batch, or
+#   even date-of-experiment.
+# - **5c (temporal)** — both directions are bad here, with a small (~0.02) edge
+#   for the leaky direction. The bimodal stress–strain curve (elastic regime
+#   then plateau) means *neither half* of the data extrapolates to the other —
+#   the model needs to see both regimes. Temporal splits that work well live
+#   in week 7's process-monitoring notebook; the lesson here is that even an
+#   "honest" temporal split can have R² well below random K-fold.
 #
 # *Defensive habit:* before reporting a CV score, ask:
 # 1. Did the test fold see any preprocessing statistics from the train fold? *(5a)*
