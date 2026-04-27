@@ -1,0 +1,5 @@
+# week3_mystery_solutions.txt
+# DO NOT OPEN until you have written down your guess for each split.
+split_A: group
+split_B: preprocessing
+split_C: temporal
