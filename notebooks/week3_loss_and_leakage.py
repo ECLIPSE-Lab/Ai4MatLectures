@@ -418,14 +418,24 @@ X_sorted = X[order]
 y_sorted = y[order]
 xs_grid = torch.linspace(X_sorted.min(), X_sorted.max(), 400)
 
+# Polynomial bases need x rescaled to ~[-1, 1] for numerical conditioning.
+# Raw strain is ~1e-2, so x^15 underflows to ~1e-30 and the design matrix is
+# numerically rank-deficient. The fit becomes a constant and you would not
+# see Runge's phenomenon at all. Mapping to [-1, 1] preserves the polynomial
+# function space (degree-d in (x-a)/b is still degree-d in x) -- it only
+# moves the basis to a regime where double precision can represent it.
+x_min, x_max = float(X_sorted.min()), float(X_sorted.max())
+def to_unit(x):
+    return 2.0 * (x - x_min) / (x_max - x_min) - 1.0
+
 degrees   = [1, 5, 15]
 n_knots_s = [4, 8, 16]
 
 fig, ax = plt.subplots(2, 3, figsize=(13, 7), sharey=True)
 
 for j, d in enumerate(degrees):
-    Phi      = polynomial_basis(X_sorted, d)
-    Phi_grid = polynomial_basis(xs_grid,  d)
+    Phi      = polynomial_basis(to_unit(X_sorted), d)
+    Phi_grid = polynomial_basis(to_unit(xs_grid),  d)
     w        = fit_basis(Phi, y_sorted)
     yhat     = (Phi_grid @ w).numpy()
     ax[0, j].scatter(X_sorted.numpy(), y_sorted.numpy(), s=8, alpha=0.5)
