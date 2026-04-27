@@ -104,8 +104,12 @@ print("params:", sum(p.numel() for p in model.parameters()))
 
 # %%
 # Manual training loop — no Lightning, no Trainer, on purpose.
+# Re-instantiate everything inside this cell so re-running the cell in Jupyter
+# (e.g. to try a different lr) starts cleanly instead of resuming training.
+torch.manual_seed(0)
+model = LinearModel()
 criterion = nn.MSELoss()
-optimizer = torch.optim.SGD(model.parameters(), lr=1e-4)
+optimizer = torch.optim.SGD(model.parameters(), lr=1e-3)
 n_epochs = 100
 
 train_losses, val_losses = [], []
@@ -132,8 +136,9 @@ for epoch in range(n_epochs):
 # %%
 fig, ax = plt.subplots(1, 2, figsize=(10, 3.5))
 ax[0].plot(train_losses, label="train"); ax[0].plot(val_losses, label="val")
-ax[0].set_xlabel("epoch"); ax[0].set_ylabel("MSE"); ax[0].legend(); ax[0].set_title("training curves")
-ax[0].grid(alpha=0.3)
+ax[0].set_xlabel("epoch"); ax[0].set_ylabel("MSE"); ax[0].set_yscale("log")
+ax[0].legend(); ax[0].set_title("training curves (log MSE)")
+ax[0].grid(alpha=0.3, which="both")
 
 with torch.no_grad():
     xs_grid = torch.linspace(X_all.min(), X_all.max(), 200).unsqueeze(1)
