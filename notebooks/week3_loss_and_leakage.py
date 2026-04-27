@@ -247,3 +247,108 @@ plt.legend(); plt.grid(alpha=0.3); plt.tight_layout(); plt.show()
 #   while still being one matrix-vector multiply per step.
 #
 # *(Forward-pointer: full optimization deep dive — momentum, Adam, conditioning — is MFML Unit 6.)*
+
+# %% [markdown]
+# # Block 3 — The loss function is a noise-model choice
+#
+# So far we have used MSE because the homework used MSE. But MSE corresponds to
+# the assumption that the residuals $y - \hat y$ are **Gaussian** with constant
+# variance. If they are not, MSE gives a **biased** estimator.
+#
+# The fastest way to see this: contaminate the dataset with a few outliers (sensor
+# failures, mis-recorded specimens) and refit with three different losses.
+#
+# *(see MFML §"loss as decision proxy", §"MSE/MAE/Huber"; ML-PC §28 "bias-variance")*
+
+# %%
+# Build a contaminated copy: take the original 600 °C data and corrupt 3% of points.
+torch.manual_seed(0)
+X_clean = X.clone()
+y_clean = y.clone()
+
+n_outliers = max(1, int(0.03 * len(X_clean)))
+outlier_idx = torch.randperm(len(X_clean))[:n_outliers]
+y_dirty = y_clean.clone()
+y_dirty[outlier_idx] += torch.empty(n_outliers).uniform_(300.0, 600.0)
+
+
+# %%
+# Use Adam for all three losses: it adapts per-parameter step sizes so a single
+# `lr` works on the raw stress / strain scale (the design matrix is hopelessly
+# ill-conditioned in raw units; see Block 1's "Why standardise?" sidebar).
+# Adam is forward-pointed in MFML §"beyond vanilla SGD".
+def fit_with_loss(loss_module, n_iters=2000, lr=1.0):
+    torch.manual_seed(0)
+    m = nn.Linear(1, 1)
+    opt = torch.optim.Adam(m.parameters(), lr=lr)
+    Xc = X_clean.unsqueeze(1)
+    for _ in range(n_iters):
+        opt.zero_grad()
+        loss = loss_module(m(Xc).squeeze(1), y_dirty)
+        loss.backward()
+        opt.step()
+    return m
+
+m_mse   = fit_with_loss(nn.MSELoss())
+m_huber = fit_with_loss(nn.HuberLoss(delta=10.0))
+m_mae   = fit_with_loss(nn.L1Loss())
+
+xs_grid = torch.linspace(X_clean.min(), X_clean.max(), 200).unsqueeze(1)
+with torch.no_grad():
+    yh_mse   = m_mse(xs_grid).squeeze().numpy()
+    yh_huber = m_huber(xs_grid).squeeze().numpy()
+    yh_mae   = m_mae(xs_grid).squeeze().numpy()
+
+# Reference: OLS on the *clean* data — the "what would an outlier-free MSE give?" line.
+A_c = torch.stack([X_clean, torch.ones_like(X_clean)], dim=1)
+w_ref = torch.linalg.lstsq(A_c, y_clean.unsqueeze(1)).solution.squeeze()
+yh_ref = (w_ref[0] * xs_grid.squeeze() + w_ref[1]).numpy()
+
+print(f"slope (clean OLS):   {w_ref[0]:7.2f}")
+print(f"slope (MSE on dirty):  {m_mse.weight.item():7.2f}   <- pulled UP by outliers")
+print(f"slope (Huber on dirty):{m_huber.weight.item():7.2f}   <- close to clean OLS")
+print(f"slope (MAE on dirty):  {m_mae.weight.item():7.2f}   <- median, not mean — different story (see take-away)")
+
+
+# %%
+fig, ax = plt.subplots(1, 2, figsize=(11, 4))
+ax[0].scatter(X_clean.numpy(), y_dirty.numpy(), s=10, alpha=0.5, label='dirty data')
+ax[0].plot(xs_grid.numpy().squeeze(), yh_ref,   'k--', lw=1.5, label='OLS on CLEAN data')
+ax[0].plot(xs_grid.numpy().squeeze(), yh_mse,   label='MSE')
+ax[0].plot(xs_grid.numpy().squeeze(), yh_huber, label='Huber')
+ax[0].plot(xs_grid.numpy().squeeze(), yh_mae,   label='MAE (L1)')
+ax[0].set_xlabel('strain'); ax[0].set_ylabel('stress'); ax[0].legend(); ax[0].set_title('three losses, same dirty data')
+
+# Residual histograms tell the same story: MSE has a heavy tail because outliers dragged the fit.
+with torch.no_grad():
+    r_mse   = (y_dirty - m_mse(X_clean.unsqueeze(1)).squeeze(1)).numpy()
+    r_huber = (y_dirty - m_huber(X_clean.unsqueeze(1)).squeeze(1)).numpy()
+    r_mae   = (y_dirty - m_mae(X_clean.unsqueeze(1)).squeeze(1)).numpy()
+ax[1].hist(r_mse,   bins=30, alpha=0.5, label='MSE residuals')
+ax[1].hist(r_huber, bins=30, alpha=0.5, label='Huber residuals')
+ax[1].hist(r_mae,   bins=30, alpha=0.5, label='MAE residuals')
+ax[1].set_xlabel('residual'); ax[1].set_ylabel('count'); ax[1].legend(); ax[1].set_title('residual distributions')
+plt.tight_layout(); plt.show()
+
+
+# %% [markdown]
+# **Reading the picture.** Three regimes:
+#
+# - **MSE drifts noticeably toward the outliers** — because it is the negative
+#   log-likelihood of a Gaussian, and Gaussians have no heavy tail to absorb
+#   them. Each outlier contributes a *quadratic* penalty that the optimizer pays
+#   by tilting the line.
+# - **Huber stays close to "OLS on clean data"** — the dashed line. Huber tells
+#   you "treat small residuals as squared, large residuals as absolute" — which
+#   is exactly what robust statistics has said since the 1960s. This is the
+#   right move when you trust most of your data and want one or two specimens
+#   to not dictate the fit.
+# - **MAE goes somewhere different on its own.** L1 regression solves for the
+#   *median residual*, not the mean — and on a curved stress–strain plot the
+#   median line is dominated by the dense cloud of low-strain low-stress points,
+#   giving a much shallower slope. So MAE is "robust to outliers" *and* "robust
+#   to the curvature being wrong" — it solves a different problem from MSE.
+#
+# **Decision rule for the semester:** plot the residuals. Heavy tails → drop MSE
+# in favour of Huber. Want central tendency, not mean? Use MAE. Want the
+# Gaussian assumption to actually hold? Use MSE — and check the residuals.
