@@ -363,3 +363,96 @@ plt.tight_layout(); plt.show()
 # **Decision rule for the semester:** plot the residuals. Heavy tails → drop MSE
 # in favour of Huber. Want central tendency, not mean? Use MAE. Want the
 # Gaussian assumption to actually hold? Use MSE — and check the residuals.
+
+
+# %% [markdown]
+# # Block 4 — Basis functions: polynomial → Runge → cubic spline
+#
+# `nn.Linear(1, 1)` cannot fit the post-yield work-hardening tail. Time for the
+# linearity-in-parameters trick from MFML: replace strain $x$ with a vector of
+# basis functions $\phi(x) = [\phi_0(x), \phi_1(x), \dots, \phi_{p-1}(x)]^\top$,
+# then fit $\hat y = w^\top \phi(x)$.
+#
+# Two bases:
+# 1. **Polynomial:** $\phi_k(x) = x^k$. Easy to write, but high degrees suffer from
+#    **Runge's phenomenon** — wild oscillations near data boundaries.
+# 2. **Cubic B-spline:** piecewise cubics joined smoothly at *knots*. Locally
+#    flexible, globally well-behaved.
+#
+# *(see MFML §"linearity principle", §"Runge's phenomenon", §"splines")*
+
+# %%
+def polynomial_basis(x, degree):
+    """Returns the design matrix [1, x, x^2, ..., x^degree], shape (N, degree+1)."""
+    cols = [torch.ones_like(x)]
+    for k in range(1, degree + 1):
+        cols.append(x ** k)
+    return torch.stack(cols, dim=1)
+
+def cubic_bspline_basis(x_np, n_knots):
+    """Returns a clamped cubic B-spline design matrix, shape (N, n_basis_functions).
+
+    Uses scipy for the basis construction; the regression itself stays in torch.
+    """
+    k = 3   # cubic
+    knots_inner = np.linspace(x_np.min(), x_np.max(), n_knots)[1:-1]
+    knots = np.concatenate(([x_np.min()] * (k + 1), knots_inner, [x_np.max()] * (k + 1)))
+    n_basis = len(knots) - k - 1
+    cols = []
+    for j in range(n_basis):
+        c = np.zeros(n_basis)
+        c[j] = 1.0
+        spline = BSpline(knots, c, k, extrapolate=False)
+        cols.append(np.nan_to_num(spline(x_np)))
+    return torch.tensor(np.stack(cols, axis=1), dtype=torch.float32)
+
+def fit_basis(Phi, y):
+    """Closed-form least squares: w = (Phi^T Phi)^-1 Phi^T y."""
+    return torch.linalg.lstsq(Phi, y.unsqueeze(1)).solution.squeeze()
+
+
+# %%
+# Sort once for clean line plots.
+order = torch.argsort(X)
+X_sorted = X[order]
+y_sorted = y[order]
+xs_grid = torch.linspace(X_sorted.min(), X_sorted.max(), 400)
+
+degrees   = [1, 5, 15]
+n_knots_s = [4, 8, 16]
+
+fig, ax = plt.subplots(2, 3, figsize=(13, 7), sharey=True)
+
+for j, d in enumerate(degrees):
+    Phi      = polynomial_basis(X_sorted, d)
+    Phi_grid = polynomial_basis(xs_grid,  d)
+    w        = fit_basis(Phi, y_sorted)
+    yhat     = (Phi_grid @ w).numpy()
+    ax[0, j].scatter(X_sorted.numpy(), y_sorted.numpy(), s=8, alpha=0.5)
+    ax[0, j].plot(xs_grid.numpy(), yhat, 'r-', lw=2)
+    ax[0, j].set_title(f"polynomial degree {d}")
+    ax[0, j].set_xlabel("strain"); ax[0, 0].set_ylabel("stress")
+
+for j, n in enumerate(n_knots_s):
+    Phi      = cubic_bspline_basis(X_sorted.numpy(), n)
+    Phi_grid = cubic_bspline_basis(xs_grid.numpy(),  n)
+    w        = fit_basis(Phi, y_sorted)
+    yhat     = (Phi_grid @ w).numpy()
+    ax[1, j].scatter(X_sorted.numpy(), y_sorted.numpy(), s=8, alpha=0.5)
+    ax[1, j].plot(xs_grid.numpy(), yhat, 'g-', lw=2)
+    ax[1, j].set_title(f"cubic B-spline, {n} knots")
+    ax[1, j].set_xlabel("strain"); ax[1, 0].set_ylabel("stress")
+
+plt.suptitle("Polynomial bases (top) wiggle at high degree; spline bases (bottom) stay sane", y=1.02)
+plt.tight_layout(); plt.show()
+
+
+# %% [markdown]
+# **Reading the picture.** A polynomial of degree 15 over-fits the noise *and*
+# develops the Runge oscillation at the boundaries. A cubic spline with 16 knots
+# uses about the same number of parameters but stays locally smooth — because
+# each knot only influences its neighbourhood, the model can be flexible *where
+# the data needs it* and rigid elsewhere.
+#
+# *Take-away:* "more parameters" is a bad summary of model capacity. *Where* the
+# parameters can flex matters more.
