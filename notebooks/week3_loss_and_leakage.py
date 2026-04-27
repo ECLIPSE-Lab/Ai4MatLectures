@@ -477,3 +477,182 @@ plt.tight_layout(); plt.show()
 #
 # *Take-away:* "more parameters" is a bad summary of model capacity. *Where* the
 # parameters can flex matters more.
+
+
+# %% [markdown]
+# # Block 5 — Three flavours of leakage
+#
+# Block 4 gave us a great fit on 600 °C data. Now we ask the harder question:
+# **does that fit say anything about a *new* test specimen?** The answer depends
+# on how we split the data.
+#
+# We will combine all three temperatures (0, 400, 600 °C) into one dataset with
+# strain *and* temperature as features. Then evaluate the *same* spline regressor
+# under three splits — each leaky in exactly one way — and compare to the honest
+# split.
+#
+# *(see ML-PC §31–37 "holdout / K-fold / leakage")*
+
+# %%
+def make_combined_dataset():
+    Xs, ys, T_groups = [], [], []
+    for T in (0, 400, 600):
+        ds = TensileTestDataset(temperature=T)
+        strain = ds.X.squeeze(1).numpy()
+        stress = ds.y.numpy()
+        Xs.append(np.column_stack([strain, np.full_like(strain, T)]))
+        ys.append(stress)
+        T_groups.append(np.full_like(strain, T))
+    X = np.vstack(Xs)
+    y = np.concatenate(ys)
+    g = np.concatenate(T_groups).astype(np.int64)
+    return X, y, g
+
+X_all_np, y_all_np, group_all = make_combined_dataset()
+print(f"combined dataset: N={X_all_np.shape[0]}  D={X_all_np.shape[1]}  groups={set(group_all.tolist())}")
+
+
+def fit_spline_2d(X_train, y_train, X_test, y_test, n_knots=8):
+    """Fit a spline-in-strain * linear-in-temperature model. Returns test-R^2."""
+    # Build the design matrix: spline on strain (col 0), interacted linearly with temperature (col 1).
+    strain_train, temp_train = X_train[:, 0], X_train[:, 1]
+    strain_test,  temp_test  = X_test[:,  0], X_test[:,  1]
+    Phi_strain_train = cubic_bspline_basis(strain_train, n_knots)
+    Phi_strain_test  = cubic_bspline_basis(strain_test,  n_knots)
+    # Stack: [spline cols] + [spline cols * temperature].
+    T_tr = torch.tensor(temp_train, dtype=torch.float32).unsqueeze(1)
+    T_te = torch.tensor(temp_test,  dtype=torch.float32).unsqueeze(1)
+    Phi_tr = torch.cat([Phi_strain_train, Phi_strain_train * T_tr], dim=1)
+    Phi_te = torch.cat([Phi_strain_test,  Phi_strain_test  * T_te], dim=1)
+    y_tr_t = torch.tensor(y_train, dtype=torch.float32)
+    y_te_t = torch.tensor(y_test,  dtype=torch.float32)
+    w = torch.linalg.lstsq(Phi_tr, y_tr_t.unsqueeze(1)).solution.squeeze()
+    yhat = Phi_te @ w
+    ss_res = ((y_te_t - yhat) ** 2).sum().item()
+    ss_tot = ((y_te_t - y_te_t.mean()) ** 2).sum().item()
+    return 1.0 - ss_res / max(ss_tot, 1e-12)
+
+
+# %% [markdown]
+# ## 5a — Pre-processing leakage (standardise before splitting)
+
+# %%
+rng = np.random.default_rng(0)
+
+def split_random(X, y, frac_train=0.7):
+    n = X.shape[0]
+    perm = rng.permutation(n)
+    cut = int(frac_train * n)
+    return X[perm[:cut]], X[perm[cut:]], y[perm[:cut]], y[perm[cut:]]
+
+# Honest: standardise INSIDE the train fold, then apply the same transform to test.
+X_tr, X_te, y_tr, y_te = split_random(X_all_np, y_all_np)
+mu, sd = X_tr.mean(axis=0), X_tr.std(axis=0)
+X_tr_h = (X_tr - mu) / sd
+X_te_h = (X_te - mu) / sd
+r2_honest_pp = fit_spline_2d(X_tr_h, y_tr, X_te_h, y_te)
+
+# Leaky: standardise the WHOLE dataset first, then split. Test stats bleed into train.
+mu_all, sd_all = X_all_np.mean(axis=0), X_all_np.std(axis=0)
+X_full_scaled = (X_all_np - mu_all) / sd_all
+rng = np.random.default_rng(0)  # reset so the row indices match
+X_tr_l, X_te_l, y_tr_l, y_te_l = split_random(X_full_scaled, y_all_np)
+r2_leaky_pp = fit_spline_2d(X_tr_l, y_tr_l, X_te_l, y_te_l)
+
+print(f"5a pre-processing  | honest R^2 = {r2_honest_pp:.3f}    leaky R^2 = {r2_leaky_pp:.3f}    gap = {r2_leaky_pp - r2_honest_pp:+.3f}")
+
+
+# %% [markdown]
+# ## 5b — Group leakage (random K-fold across temperatures)
+
+# %%
+def random_kfold(X, y, k=5):
+    n = X.shape[0]
+    perm = np.random.default_rng(0).permutation(n)
+    folds = np.array_split(perm, k)
+    scores = []
+    for i in range(k):
+        te = folds[i]
+        tr = np.concatenate([folds[j] for j in range(k) if j != i])
+        scores.append(fit_spline_2d(X[tr], y[tr], X[te], y[te]))
+    return float(np.mean(scores))
+
+def group_kfold(X, y, groups, k=3):
+    """Leave-one-group-out — here k=3 because we have 3 temperatures."""
+    unique_g = np.unique(groups)
+    scores = []
+    for g in unique_g:
+        te_mask = groups == g
+        scores.append(fit_spline_2d(X[~te_mask], y[~te_mask], X[te_mask], y[te_mask]))
+    return float(np.mean(scores))
+
+r2_random_cv = random_kfold(X_all_np, y_all_np, k=5)
+r2_group_cv  = group_kfold(X_all_np, y_all_np, group_all)
+print(f"5b group           | random K-fold R^2 = {r2_random_cv:.3f}   group K-fold R^2 = {r2_group_cv:.3f}   gap = {r2_random_cv - r2_group_cv:+.3f}")
+
+
+# %% [markdown]
+# ## 5c — Temporal leakage (predicting the past from the future)
+
+# %%
+def split_temporal(X, y, groups, train_late=True):
+    """Within each group, take the late half as train (or test, if not train_late)."""
+    tr_idx, te_idx = [], []
+    for g in np.unique(groups):
+        in_g = np.where(groups == g)[0]
+        in_g_sorted = in_g[np.argsort(X[in_g, 0])]   # sort by strain == time within a tensile test
+        cut = len(in_g_sorted) // 2
+        if train_late:
+            tr_idx.extend(in_g_sorted[cut:].tolist())
+            te_idx.extend(in_g_sorted[:cut].tolist())
+        else:
+            tr_idx.extend(in_g_sorted[:cut].tolist())
+            te_idx.extend(in_g_sorted[cut:].tolist())
+    tr_idx = np.array(tr_idx); te_idx = np.array(te_idx)
+    return X[tr_idx], X[te_idx], y[tr_idx], y[te_idx]
+
+# Honest temporal split: train on early time -> predict late time (the realistic
+# scenario for a process-monitoring model).
+X_tr, X_te, y_tr, y_te = split_temporal(X_all_np, y_all_np, group_all, train_late=False)
+r2_honest_t = fit_spline_2d(X_tr, y_tr, X_te, y_te)
+
+# Leaky: train on LATE -> predict EARLY (predicting the past from the future).
+X_tr, X_te, y_tr, y_te = split_temporal(X_all_np, y_all_np, group_all, train_late=True)
+r2_leaky_t  = fit_spline_2d(X_tr, y_tr, X_te, y_te)
+
+print(f"5c temporal        | honest (train→future) R^2 = {r2_honest_t:.3f}   leaky (train←future) R^2 = {r2_leaky_t:.3f}   gap = {r2_leaky_t - r2_honest_t:+.3f}")
+
+
+# %%
+# Bar chart: visual summary of all three demos.
+labels = ['5a pre-proc', '5b group', '5c temporal']
+honest = [r2_honest_pp, r2_group_cv,  r2_honest_t]
+leaky  = [r2_leaky_pp,  r2_random_cv, r2_leaky_t]
+xpos = np.arange(len(labels))
+
+plt.figure(figsize=(8, 4))
+plt.bar(xpos - 0.2, honest, width=0.4, label='honest')
+plt.bar(xpos + 0.2, leaky,  width=0.4, label='leaky')
+plt.xticks(xpos, labels); plt.ylabel(r'$R^2$ on test')
+plt.title("Three flavours of leakage — same model, same data, different verdicts")
+plt.axhline(0, color='k', lw=0.5); plt.legend(); plt.grid(axis='y', alpha=0.3); plt.tight_layout(); plt.show()
+
+max_gap = max(abs(l - h) for l, h in zip(leaky, honest))
+print(f"\nlargest leaky-vs-honest R^2 gap: {max_gap:.3f}")
+assert max_gap >= 0.10, (
+    f"acceptance criterion failed: largest gap is {max_gap:.3f} < 0.10. "
+    "Tune n_knots or split fractions to widen the gap before shipping."
+)
+
+
+# %% [markdown]
+# **The take-away.** Same model, same data, three different "test-R²" numbers
+# depending on the split. A model deployed on the basis of any one of these
+# leaky validation schemes would systematically under-perform in production.
+#
+# *Defensive habit:* before reporting a CV score, ask:
+# 1. Did the test fold see any preprocessing statistics from the train fold? *(5a)*
+# 2. Does each test row have a near-identical sibling in the train fold? *(5b)*
+# 3. Does the train fold contain information that postdates the test fold? *(5c)*
+#
+# If yes to any of them, your validation is leaking and your test-R² is fiction.
