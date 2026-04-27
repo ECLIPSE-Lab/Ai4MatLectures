@@ -286,16 +286,23 @@ plt.grid(alpha=0.3); plt.tight_layout(); plt.show()
 
 # %%
 # CWT view: the burst pops out at exactly the right (time, frequency).
-scales = np.arange(1, 64)
+# Scale range is chosen so freqs_cwt covers ~3 Hz (below the 5 Hz carrier) up to
+# ~150 Hz (above the 80 Hz burst). For the Morlet wavelet, scale s maps to
+# frequency f ≈ 0.8125 / (s * dt), so larger s = lower f.
+scales = np.geomspace(1, 600, 80)
 coeffs, freqs_cwt = pywt.cwt(signal_c, scales=scales, wavelet="morl", sampling_period=1/fs_c)
 
+# `coeffs` is ordered (smallest scale = highest freq) at row 0. Use origin='upper'
+# so row 0 lands at the TOP of the image, matching the extent's high-freq-on-top.
 plt.figure(figsize=(10, 4))
 plt.imshow(np.abs(coeffs),
-           aspect="auto", origin="lower",
+           aspect="auto", origin="upper",
            extent=[t_c[0], t_c[-1], freqs_cwt[-1], freqs_cwt[0]],
            cmap="viridis")
+plt.ylim(0, 150)  # crop the empty high-freq band so the burst dominates the figure
 plt.xlabel("time (s)"); plt.ylabel("frequency (Hz)")
-plt.title("Continuous wavelet scalogram — bright blob = burst at (t≈0.65 s, f≈80 Hz)")
+plt.title("Continuous wavelet scalogram — bright blob = burst at (t≈0.65 s, f≈80 Hz);\n"
+          "thin horizontal band near 5 Hz = the carrier (always present, like FFT says)")
 plt.colorbar(label="|W(t, f)|"); plt.tight_layout(); plt.show()
 
 
