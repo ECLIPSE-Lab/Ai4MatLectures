@@ -106,6 +106,14 @@ print(f"||w_sgd - w_ols||_2 = {(w_sgd - w_ols).norm().item():.6f}")
 # what the closed form gives in one matrix solve. We will use this fact to benchmark
 # every other optimizer in Block 2 (which also fits in standardised coordinates).
 #
+# **Note on the printed numbers.** The intercept is exactly `0.0000` because we
+# standardised `y` so its sample mean is zero — the slope carries all the signal,
+# and any non-zero intercept would just mean we mis-centred. The slope value
+# (~0.51) is the Pearson correlation between standardised strain and standardised
+# stress: less than 1 because a straight line through this curved stress–strain
+# data leaves substantial unexplained variance. Block 4 will fix that with a
+# better basis.
+#
 # **Why standardise?** With the raw stress range of ~30 MPa and the raw strain range
 # of ~0.02, the design matrix is staggeringly ill-conditioned — full-batch GD on the
 # raw data with any single learning rate moves the slope and intercept at vastly
