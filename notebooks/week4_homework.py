@@ -79,9 +79,9 @@ print(f"X shape: {tuple(X.shape)}   y shape: {tuple(y.shape)}   classes: {y.uniq
 torch.manual_seed(0)
 H = 16
 
-W1 = torch.randn(2, H, requires_grad=True) * 0.5
+W1 = (torch.randn(2, H) * 0.5).requires_grad_(True)
 b1 = torch.zeros(H, requires_grad=True)
-W2 = torch.randn(H, 3, requires_grad=True) * 0.5
+W2 = (torch.randn(H, 3) * 0.5).requires_grad_(True)
 b2 = torch.zeros(3, requires_grad=True)
 
 
