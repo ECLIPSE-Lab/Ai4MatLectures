@@ -42,6 +42,7 @@ from numpy.linalg import svd, eigh, cond
 from sklearn.decomposition import PCA
 
 np.random.seed(0)
+rng = np.random.default_rng(0)
 torch.manual_seed(0)
 
 # A small helper to show two images side-by-side cleanly.
