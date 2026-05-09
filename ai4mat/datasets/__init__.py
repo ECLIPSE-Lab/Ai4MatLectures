@@ -5,6 +5,7 @@ from .ising import IsingDataset
 from .cahn_hilliard import CahnHilliardDataset
 from .chemical_elements import ChemicalElementsDataset
 from .nanoindentation import NanoindentationDataset
+from .crystal_graphs import CrystalGraphsDataset
 
 __all__ = [
     "IrisDataset",
@@ -14,4 +15,5 @@ __all__ = [
     "CahnHilliardDataset",
     "ChemicalElementsDataset",
     "NanoindentationDataset",
+    "CrystalGraphsDataset",
 ]
