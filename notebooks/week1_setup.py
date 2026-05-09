@@ -580,7 +580,11 @@ plt.show()
 
 # ![Smiley Face Output](smiley.png)
 
-#%%
+# %%
+#| eval: false
+# Student fill-in cell: with placeholders (radius_mouth = 0, ...) this would
+# crash on imshow / fail the final assert.  We skip execution during render
+# so the cell source stays visible without breaking the build.
 # Step 1: Create a 256x256 image of zeros
 image = np.zeros((256, 256), dtype=np.float32)
 
