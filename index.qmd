@@ -10,13 +10,26 @@ Install the package:
 pip install git+https://github.com/ECLIPSE-Lab/Ai4MatLectures.git "mdsdata>=0.1.5"
 ```
 
+## Live (braided) weekly notebooks
+
+These are the canonical *in-class* notebooks — one homework + one main file
+per week, braiding the matching MFML and ML-PC units. Run them as Python
+scripts (Jupytext cell markers).
+
+| Week | Topic | Homework | Main (90 min) |
+|---|---|---|---|
+| 3 | Loss minimization & leakage | [week3_homework.py](notebooks/week3_homework.py) | [week3_loss_and_leakage.py](notebooks/week3_loss_and_leakage.py) |
+| 4 | Architecture & representation | [week4_homework.py](notebooks/week4_homework.py) | [week4_architecture_and_representation.py](notebooks/week4_architecture_and_representation.py) |
+| 5 | Clustering & autoencoders | [week5_homework.py](notebooks/week5_homework.py) | [week5_clustering_and_autoencoders.py](notebooks/week5_clustering_and_autoencoders.py) |
+| 7 | Generalization, ensembles & distribution shift | [week7_homework.py](notebooks/week7_homework.py) | [week7_generalization_and_ensembles.py](notebooks/week7_generalization_and_ensembles.py) |
+
 ## MFML — Mathematical Foundations of AI & ML
 
 | Week | Topic | Dataset | Notebook |
 |---|---|---|---|
 | 4 | NN architecture & backprop | Iris / Alpaydin Digits | [week04_classifier_iris](notebooks/MFML/week04_classifier_iris.html), [week05_backprop_digits](notebooks/MFML/week05_backprop_digits.html) |
-| 5 | Clustering & autoencoders | Nanoindentation / Ising full | [week11_clustering_nanoindentation](notebooks/MFML/week11_clustering_nanoindentation.html), [week10_autoencoder_ising_full](notebooks/MFML/week10_autoencoder_ising_full.html) |
-| 7 | Overfitting & regularization | Ising light | [week07_overfitting_ising_light](notebooks/MFML/week07_overfitting_ising_light.html) |
+| 5 | Clustering & autoencoders | Nanoindentation / Ising full | **braided:** [week5_clustering_and_autoencoders.py](notebooks/week5_clustering_and_autoencoders.py); per-course: [week11_clustering_nanoindentation](notebooks/MFML/week11_clustering_nanoindentation.html), [week10_autoencoder_ising_full](notebooks/MFML/week10_autoencoder_ising_full.html) |
+| 7 | Overfitting, regularization & tree ensembles | Ising light / Tensile / SOAP | **braided:** [week7_generalization_and_ensembles.py](notebooks/week7_generalization_and_ensembles.py); per-course: [week07_overfitting_ising_light](notebooks/MFML/week07_overfitting_ising_light.html) |
 | 10 | Latent spaces & embeddings | Ising full | [week10_autoencoder_ising_full](notebooks/MFML/week10_autoencoder_ising_full.html) |
 | 11 | Unsupervised learning (deep dive) | Nanoindentation | [week11_clustering_nanoindentation](notebooks/MFML/week11_clustering_nanoindentation.html) |
 
@@ -25,8 +38,8 @@ pip install git+https://github.com/ECLIPSE-Lab/Ai4MatLectures.git "mdsdata>=0.1.
 | Week | Topic | Dataset | Notebook |
 |---|---|---|---|
 | 4 | Microstructure representations & CNN baseline | Alpaydin Digits / Ising | [week04_baseline_digits](notebooks/MLPC/week04_baseline_digits.html), [week05_cnn_ising_light](notebooks/MLPC/week05_cnn_ising_light.html), [week05_cnn_ising_full](notebooks/MLPC/week05_cnn_ising_full.html) |
-| 5 | Unsupervised learning in materials | Cahn-Hilliard | [week11_anomaly_cahn_hilliard](notebooks/MLPC/week11_anomaly_cahn_hilliard.html) |
-| 7 | Process monitoring | Tensile Test | [week07_process_monitoring_tensile](notebooks/MLPC/week07_process_monitoring_tensile.html) |
+| 5 | Unsupervised learning in materials | Ising / Cahn-Hilliard | **braided:** [week5_clustering_and_autoencoders.py](notebooks/week5_clustering_and_autoencoders.py); per-course: [week11_anomaly_cahn_hilliard](notebooks/MLPC/week11_anomaly_cahn_hilliard.html) |
+| 7 | Process monitoring & distribution shift | Tensile Test | **braided:** [week7_generalization_and_ensembles.py](notebooks/week7_generalization_and_ensembles.py); per-course: [week07_process_monitoring_tensile](notebooks/MLPC/week07_process_monitoring_tensile.html) |
 | 11 | Anomaly detection via AE (automation context) | Cahn-Hilliard | [week11_anomaly_cahn_hilliard](notebooks/MLPC/week11_anomaly_cahn_hilliard.html) |
 
 ## MG — Materials Genomics
@@ -34,6 +47,7 @@ pip install git+https://github.com/ECLIPSE-Lab/Ai4MatLectures.git "mdsdata>=0.1.
 | Week | Topic | Dataset | Notebook |
 |---|---|---|---|
 | 5 | Descriptors + regression | Chemical Elements | [week05_descriptors_elements](notebooks/MG/week05_descriptors_elements.html) |
+| 7 | Local atomic envs (SOAP) & grouped CV | ASE bulk prototypes (Cu/Fe/Si/NaCl/MgO) | **braided:** [week7_generalization_and_ensembles.py](notebooks/week7_generalization_and_ensembles.py) (Block 6) |
 | 8 | Regression & generalization | Nanoindentation | [week08_regression_nanoindentation](notebooks/MG/week08_regression_nanoindentation.html) |
 | 11 | Latent space (Ising) | Ising light | [week11_latent_ising](notebooks/MG/week11_latent_ising.html) |
 | 11 | Materials latent space | Cahn-Hilliard | [week11_latent_cahn_hilliard](notebooks/MG/week11_latent_cahn_hilliard.html) |
