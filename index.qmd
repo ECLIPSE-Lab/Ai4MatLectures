@@ -29,6 +29,7 @@ scripts (Jupytext cell markers).
 | 11 | Generative inverse design (VAE, CVAE, DDPM) | [week11_homework.py](notebooks/week11_homework.py) | [week11_generative_inverse_design.py](notebooks/week11_generative_inverse_design.py) |
 | 12 | Uncertainty, GPs & discovery | [week12_homework.py](notebooks/week12_homework.py) | [week12_uncertainty_and_discovery.py](notebooks/week12_uncertainty_and_discovery.py) |
 | 13 | Physics-informed learning, GPs & active discovery | [week13_homework.py](notebooks/week13_homework.py) | [week13_physics_and_gp.py](notebooks/week13_physics_and_gp.py) |
+| 14 | Explainability, limits & course retrospective | [week14_homework.py](notebooks/week14_homework.py) | [week14_explainability_and_limits.py](notebooks/week14_explainability_and_limits.py) |
 
 ## MFML — Mathematical Foundations of AI & ML
 
