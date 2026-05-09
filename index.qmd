@@ -21,8 +21,14 @@ scripts (Jupytext cell markers).
 | 3 | Loss minimization & leakage | [week3_homework.py](notebooks/week3_homework.py) | [week3_loss_and_leakage.py](notebooks/week3_loss_and_leakage.py) |
 | 4 | Architecture & representation | [week4_homework.py](notebooks/week4_homework.py) | [week4_architecture_and_representation.py](notebooks/week4_architecture_and_representation.py) |
 | 5 | Clustering & autoencoders | [week5_homework.py](notebooks/week5_homework.py) | [week5_clustering_and_autoencoders.py](notebooks/week5_clustering_and_autoencoders.py) |
+| 6 | Optimization & fine-tuning | [week6_homework.py](notebooks/week6_homework.py) | [week6_optimization_and_finetuning.py](notebooks/week6_optimization_and_finetuning.py) |
 | 7 | Generalization, ensembles & distribution shift | [week7_homework.py](notebooks/week7_homework.py) | [week7_generalization_and_ensembles.py](notebooks/week7_generalization_and_ensembles.py) |
+| 8 | Uncertainty & robustness on tensile data | [week8_homework.py](notebooks/week8_homework.py) | [week8_uncertainty_and_robustness.py](notebooks/week8_uncertainty_and_robustness.py) |
+| 9 | Latent geometry — PCA, t-SNE, probing, contrastive | [week9_homework.py](notebooks/week9_homework.py) | [week9_latent_geometry.py](notebooks/week9_latent_geometry.py) |
+| 10 | Attention, ViT & cross-system transfer | [week10_homework.py](notebooks/week10_homework.py) | [week10_attention_and_transfer.py](notebooks/week10_attention_and_transfer.py) |
+| 11 | Generative inverse design (VAE, CVAE, DDPM) | [week11_homework.py](notebooks/week11_homework.py) | [week11_generative_inverse_design.py](notebooks/week11_generative_inverse_design.py) |
 | 12 | Uncertainty, GPs & discovery | [week12_homework.py](notebooks/week12_homework.py) | [week12_uncertainty_and_discovery.py](notebooks/week12_uncertainty_and_discovery.py) |
+| 13 | Physics-informed learning, GPs & active discovery | [week13_homework.py](notebooks/week13_homework.py) | [week13_physics_and_gp.py](notebooks/week13_physics_and_gp.py) |
 
 ## MFML — Mathematical Foundations of AI & ML
 

@@ -1,0 +1,832 @@
+# %% [markdown]
+# # Week 11 — Generative inverse design
+#
+# This week we braid three lectures around one move: **flip the
+# encoder-decoder around and use the latent space to generate candidates
+# under a target property.**
+#
+# 1. **MFML Unit 11**: Generative models — VAE, β-VAE, conditional VAE,
+#    DDPM forward and reverse processes, score matching.
+# 2. **ML-PC Unit 11** (delivered title; folder still
+#    `unit09_inverse_problems`): generative inverse design — VAE-based
+#    property targeting, diffusion-based microstructure generation,
+#    failure modes (mode collapse, OOD targets).
+# 3. **MG Unit 10** (delivered as W11): latent spaces of materials —
+#    composition–structure–property maps, **latent-space arithmetic for
+#    property targeting**.
+#
+# **Red thread:** *Week 9 read the latent space; today we write it.* The
+# encoder gave us geometry (Week 9). The decoder gives us samples (today).
+# Latent-space arithmetic from MG turns the embedding into a control
+# surface — pick a direction, decode, get a candidate with target
+# properties. MFML supplies the VAE/diffusion machinery; ML-PC frames the
+# inverse-design problem; MG shows that the same logic applies to
+# materials embeddings.
+#
+# > **Pre-flight check.** This notebook **assumes** you have run
+# > `notebooks/week11_homework.py`. Block 1 picks up directly from your
+# > Part B β-VAE curves and your Part C interpolation grid.
+#
+# ## Agenda (90 min)
+#
+# | Block | Min | Topic |
+# |------:|:---:|:------|
+# | 1 | ~6  | Recap from homework — VAE, ELBO, β trade-off |
+# | 2 | ~14 | Conditional VAE on Cahn–Hilliard — generation under target free energy |
+# | 3 | ~14 | Latent-space gradient descent — inverse design as differentiable optimization |
+# | 4 | ~14 | DDPM forward + train tiny reverse model on GPU; sample (CPU fallback: forward-only) |
+# | 5 | ~14 | Materials latent-space arithmetic — stability axis on CGNN embeddings (MG W11) |
+# | 6 | ~10 | Honest limitations — mode collapse, posterior collapse, OOD generation |
+# | 7 | ~18 | Student exercises (3 core) |
+
+# %%
+# Standard imports.
+import math
+import copy
+
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import DataLoader, TensorDataset
+import matplotlib.pyplot as plt
+
+from ai4mat.datasets import CahnHilliardDataset, CrystalGraphsDataset
+
+np.random.seed(0)
+torch.manual_seed(0)
+
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+HAS_GPU = (DEVICE.type == "cuda")
+print(f"Using device: {DEVICE}  (GPU available: {HAS_GPU})")
+
+
+# %% [markdown]
+# ## Helpers — load data, copy VAE definition from homework
+
+# %%
+print("Loading Cahn-Hilliard (3 simulations, ~3000 samples)...")
+ch = CahnHilliardDataset(simulation_number=[0, 1, 2])
+y_mean = ch.y.mean().item(); y_std = ch.y.std().item()
+print(f"  loaded {len(ch)} samples; energy mean={y_mean:.1f}  std={y_std:.1f}")
+
+g = torch.Generator().manual_seed(0)
+perm = torch.randperm(len(ch), generator=g)
+n_tr = 1500; n_te = 300
+tr_idx, te_idx = perm[:n_tr], perm[n_tr:n_tr + n_te]
+X_tr = ch.X[tr_idx].to(DEVICE)
+X_te = ch.X[te_idx].to(DEVICE)
+y_tr = ch.y[tr_idx].to(DEVICE)
+y_te = ch.y[te_idx].to(DEVICE)
+y_tr_n = (y_tr - y_mean) / y_std
+y_te_n = (y_te - y_mean) / y_std
+
+
+# %%
+class TinyVAE(nn.Module):
+    """Same backbone as homework Part A.  Unconditional."""
+
+    def __init__(self, latent_dim=8):
+        super().__init__()
+        self.latent_dim = latent_dim
+        self.enc_conv = nn.Sequential(
+            nn.Conv2d(1, 16, 3, stride=2, padding=1), nn.ReLU(),
+            nn.Conv2d(16, 32, 3, stride=2, padding=1), nn.ReLU(),
+        )
+        self.enc_lin = nn.Linear(32 * 16 * 16, 2 * latent_dim)
+        self.dec_lin = nn.Linear(latent_dim, 32 * 16 * 16)
+        self.dec_conv = nn.Sequential(
+            nn.ConvTranspose2d(32, 16, 3, stride=2, padding=1, output_padding=1), nn.ReLU(),
+            nn.ConvTranspose2d(16, 1, 3, stride=2, padding=1, output_padding=1), nn.Sigmoid(),
+        )
+
+    def encode(self, x):
+        h = self.enc_conv(x).flatten(1)
+        return self.enc_lin(h).chunk(2, dim=-1)
+
+    def reparameterise(self, mu, log_var):
+        return mu + torch.exp(0.5 * log_var) * torch.randn_like(mu)
+
+    def decode(self, z):
+        return self.dec_conv(self.dec_lin(z).view(-1, 32, 16, 16))
+
+    def forward(self, x):
+        mu, log_var = self.encode(x)
+        z = self.reparameterise(mu, log_var)
+        return self.decode(z), mu, log_var, z
+
+
+def vae_loss(x, x_hat, mu, log_var, beta=1.0):
+    recon = F.mse_loss(x_hat, x, reduction="sum") / x.shape[0]
+    kl = -0.5 * (1 + log_var - mu.pow(2) - log_var.exp()).sum(dim=1).mean()
+    return recon + beta * kl, recon, kl
+
+
+# %% [markdown]
+# # Block 1 — Recap from homework
+#
+# Three takeaways frame the rest of the lecture:
+#
+# 1. **The VAE compresses CH microstructure into 8 latent dimensions**
+#    from which the decoder regenerates plausible images.
+# 2. **β controls the trade-off**: small β → busy, expressive latent;
+#    large β → near-prior latent at the cost of reconstruction quality.
+# 3. **The latent space is smooth**: walking from $z_{\text{low E}}$ to
+#    $z_{\text{high E}}$ produces a continuous sequence of plausible
+#    microstructures, not a sequence of nearest-neighbour copies.
+#
+# Today we *use* that smoothness for inverse design: given a target free
+# energy, can we find a latent that decodes to a microstructure with that
+# energy? Two methods:
+#
+# - **Conditional VAE** (Block 2): bake the target into the model.
+# - **Latent-space gradient descent** (Block 3): freeze the model, solve
+#   for $z$ at inference time.
+
+# %%
+# Quick warm-up: train an unconditional VAE that we will reuse in Blocks
+# 3 and 6 (for the latent-GD baseline and the failure-mode demos).
+print("Pretraining unconditional VAE for downstream blocks...")
+torch.manual_seed(0)
+vae = TinyVAE(latent_dim=8).to(DEVICE)
+opt = torch.optim.Adam(vae.parameters(), lr=1e-3)
+loader = DataLoader(TensorDataset(X_tr), batch_size=64, shuffle=True)
+for ep in range(4):
+    vae.train()
+    losses = []
+    for (xb,) in loader:
+        x_hat, mu, log_var, _ = vae(xb)
+        loss, _, _ = vae_loss(xb, x_hat, mu, log_var, beta=1.0)
+        opt.zero_grad(); loss.backward(); opt.step()
+        losses.append(loss.item())
+    print(f"  epoch {ep}  total ELBO loss = {np.mean(losses):.4f}")
+
+
+# %% [markdown]
+# # Block 2 — Conditional VAE on Cahn-Hilliard
+#
+# A **conditional VAE** is the cleanest form of property-targeted
+# generation: append the target $y$ to both the encoder input and the
+# decoder input. Concretely:
+#
+# - encoder: $q_\phi(z \mid x, y)$
+# - decoder: $p_\theta(x \mid z, y)$
+#
+# At inference, sample $z \sim \mathcal{N}(0, I)$, pick any $y^*$, decode
+# $\hat x = \text{dec}(z, y^*)$. This is the simplest "give me a sample
+# with energy = X" pipeline.
+#
+# *(see ML-PC §"VAE-based inverse design", §"Conditional generation
+# under target property"; MFML §"Conditional VAE")*
+
+# %%
+class TinyCVAE(nn.Module):
+    """Conditional VAE. The condition y is broadcast as a constant feature
+    map and concatenated with the input image (encoder side); on the
+    decoder side it is concatenated with z."""
+
+    def __init__(self, latent_dim=8):
+        super().__init__()
+        self.latent_dim = latent_dim
+        self.enc_conv = nn.Sequential(
+            nn.Conv2d(2, 16, 3, stride=2, padding=1), nn.ReLU(),    # 2 channels: image + y-broadcast
+            nn.Conv2d(16, 32, 3, stride=2, padding=1), nn.ReLU(),
+        )
+        self.enc_lin = nn.Linear(32 * 16 * 16, 2 * latent_dim)
+        self.dec_lin = nn.Linear(latent_dim + 1, 32 * 16 * 16)      # +1 for y
+        self.dec_conv = nn.Sequential(
+            nn.ConvTranspose2d(32, 16, 3, stride=2, padding=1, output_padding=1), nn.ReLU(),
+            nn.ConvTranspose2d(16, 1, 3, stride=2, padding=1, output_padding=1), nn.Sigmoid(),
+        )
+
+    def encode(self, x, y):
+        # broadcast y as a 64x64 feature plane
+        y_plane = y.view(-1, 1, 1, 1).expand(-1, 1, x.shape[2], x.shape[3])
+        h = self.enc_conv(torch.cat([x, y_plane], dim=1)).flatten(1)
+        return self.enc_lin(h).chunk(2, dim=-1)
+
+    def decode(self, z, y):
+        zy = torch.cat([z, y.view(-1, 1)], dim=1)
+        return self.dec_conv(self.dec_lin(zy).view(-1, 32, 16, 16))
+
+    def forward(self, x, y):
+        mu, log_var = self.encode(x, y)
+        z = mu + torch.exp(0.5 * log_var) * torch.randn_like(mu)
+        return self.decode(z, y), mu, log_var, z
+
+
+# %%
+print("Training CVAE on (image, energy) pairs...")
+torch.manual_seed(0)
+cvae = TinyCVAE(latent_dim=8).to(DEVICE)
+opt = torch.optim.Adam(cvae.parameters(), lr=1e-3)
+ds_cvae = TensorDataset(X_tr, y_tr_n)
+loader_cvae = DataLoader(ds_cvae, batch_size=64, shuffle=True)
+for ep in range(4):
+    cvae.train()
+    losses = []
+    for xb, yb in loader_cvae:
+        x_hat, mu, log_var, _ = cvae(xb, yb)
+        loss, _, _ = vae_loss(xb, x_hat, mu, log_var, beta=1.0)
+        opt.zero_grad(); loss.backward(); opt.step()
+        losses.append(loss.item())
+    print(f"  epoch {ep}  total ELBO loss = {np.mean(losses):.4f}")
+
+
+# %%
+# Sample from the CVAE prior at three target energies: low, median, high.
+y_low_n = float(y_te_n.min().item())
+y_med_n = 0.0
+y_high_n = float(y_te_n.max().item())
+targets_n = [y_low_n, y_med_n, y_high_n]
+target_labels = ["low E", "median E", "high E"]
+print(f"Target energies (de-normalised): "
+      f"low = {y_low_n*y_std + y_mean:.0f}, "
+      f"median = {y_mean:.0f}, "
+      f"high = {y_high_n*y_std + y_mean:.0f}")
+
+cvae.eval()
+n_samples_per_y = 4
+with torch.no_grad():
+    fig, axes = plt.subplots(3, n_samples_per_y, figsize=(10, 7))
+    for r, (yt, lbl) in enumerate(zip(targets_n, target_labels)):
+        z = torch.randn(n_samples_per_y, cvae.latent_dim, device=DEVICE)
+        y_t = torch.full((n_samples_per_y,), yt, device=DEVICE)
+        samples = cvae.decode(z, y_t)
+        for c in range(n_samples_per_y):
+            axes[r, c].imshow(samples[c, 0].cpu().numpy(), cmap="gray", vmin=0, vmax=1)
+            axes[r, c].axis("off")
+            if c == 0:
+                axes[r, c].set_ylabel(lbl, rotation=0, ha="right",
+                                      fontsize=11, va="center")
+plt.suptitle("CVAE samples conditioned on target free energy")
+plt.tight_layout(); plt.show()
+
+
+# %% [markdown]
+# **What you should see.** Across the three rows, the microstructures
+# differ visibly: at low target energy, the patterns are well-separated
+# phase domains; at high target energy, the patterns are noisier with
+# more interface area (CH thermodynamics: higher energy = more interface).
+# Within a row, the four samples are *different but similar* — the VAE
+# generates *diverse* candidates that all share the target property.
+#
+# This is the cleanest form of inverse design: one model, two minutes of
+# training, and a control knob that produces property-targeted samples
+# on demand.
+
+# %% [markdown]
+# # Block 3 — Latent-space gradient descent (inverse design as optimization)
+#
+# An alternative recipe: **don't** retrain the VAE — instead, use the
+# *frozen* unconditional VAE plus a *frozen* property regressor, and
+# solve for the latent that gives the target property by gradient
+# descent.
+#
+# $$
+# z^* = \arg\min_z \; \big( f(\text{dec}(z)) - y^* \big)^2
+# $$
+#
+# The chain `z → decode → regressor → property` is fully differentiable,
+# so this is a 5-line training loop. The advantage: works on *any*
+# pretrained generator + regressor, no joint retraining required. The
+# disadvantage: each target $y^*$ requires its own optimisation (the
+# CVAE amortises this).
+#
+# *(see ML-PC §"Latent optimization for inverse design"; MFML
+# §"Differentiable generation")*
+
+# %%
+# Train a small CNN regressor on (image, energy) for use in Block 3.
+class EnergyRegressor(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Conv2d(1, 16, 3, stride=2, padding=1), nn.ReLU(),
+            nn.Conv2d(16, 32, 3, stride=2, padding=1), nn.ReLU(),
+            nn.AdaptiveAvgPool2d(4), nn.Flatten(),
+            nn.Linear(32 * 16, 64), nn.ReLU(),
+            nn.Linear(64, 1),
+        )
+
+    def forward(self, x):
+        return self.net(x).squeeze(-1)
+
+
+print("Training energy regressor on CH images...")
+torch.manual_seed(0)
+reg = EnergyRegressor().to(DEVICE)
+opt = torch.optim.Adam(reg.parameters(), lr=1e-3)
+loader_reg = DataLoader(TensorDataset(X_tr, y_tr_n), batch_size=64, shuffle=True)
+for ep in range(4):
+    reg.train()
+    losses = []
+    for xb, yb in loader_reg:
+        opt.zero_grad()
+        loss = F.mse_loss(reg(xb), yb)
+        loss.backward(); opt.step()
+        losses.append(loss.item())
+    print(f"  epoch {ep}  train MSE = {np.mean(losses):.4f}")
+with torch.no_grad():
+    test_mae = (reg(X_te) - y_te_n).abs().mean().item() * y_std
+print(f"  test MAE (de-normalised): {test_mae:.1f} energy units")
+
+
+# %%
+def latent_gd(target_y_n, n_steps=300, lr=0.05):
+    """Gradient-descend in z for a target normalised energy.
+
+    Frozen unconditional VAE decoder + frozen regressor; only z requires grad.
+    """
+    z = torch.randn(1, vae.latent_dim, device=DEVICE, requires_grad=True)
+    opt_z = torch.optim.Adam([z], lr=lr)
+    target = torch.tensor([target_y_n], device=DEVICE)
+    losses = []
+    for _ in range(n_steps):
+        opt_z.zero_grad()
+        x_hat = vae.decode(z)
+        y_pred = reg(x_hat)
+        loss = (y_pred - target).pow(2).mean()
+        loss.backward(); opt_z.step()
+        losses.append(loss.item())
+    return z.detach(), losses
+
+
+# Run latent-GD for the three target energies and visualise.
+fig, axes = plt.subplots(2, 3, figsize=(9, 5.5))
+for r, (yt, lbl) in enumerate(zip(targets_n, target_labels)):
+    z_star, loss_curve = latent_gd(yt)
+    with torch.no_grad():
+        x_star = vae.decode(z_star)
+        y_pred = reg(x_star).item()
+    axes[0, r].plot(loss_curve, lw=1.0)
+    axes[0, r].set_yscale("log")
+    axes[0, r].set_title(f"{lbl}: target = {yt*y_std+y_mean:.0f}, achieved = {y_pred*y_std+y_mean:.0f}")
+    axes[0, r].set_xlabel("step"); axes[0, r].set_ylabel("(y_pred - y_target)^2")
+    axes[1, r].imshow(x_star[0, 0].cpu().numpy(), cmap="gray", vmin=0, vmax=1)
+    axes[1, r].axis("off"); axes[1, r].set_title(f"latent-GD candidate")
+plt.tight_layout(); plt.show()
+
+
+# %% [markdown]
+# **CVAE vs latent-GD — which wins?** Both produce candidates with the
+# target energy. The CVAE produces *diverse* candidates per call (different
+# z, same y); latent-GD produces a *deterministic* candidate per random
+# init. Latent-GD requires no retraining — useful when a new target is
+# requested at inference time. CVAE amortises the optimisation — useful
+# when many targets need many samples.
+#
+# Real-world materials inverse design uses both: a CVAE for proposal
+# generation, latent-GD for refinement.
+
+# %% [markdown]
+# # Block 4 — DDPM forward + train tiny reverse model
+#
+# The other major generative family: **denoising diffusion probabilistic
+# models** (DDPM). The forward process gradually adds Gaussian noise:
+#
+# $$
+# q(x_t \mid x_0) = \mathcal{N}(\sqrt{\bar\alpha_t}\, x_0,\, (1 - \bar\alpha_t) I)
+# $$
+#
+# The reverse process is a *learned* sequence of denoising steps. Training
+# is one line: a U-Net predicts the noise $\varepsilon$ given $(x_t, t)$.
+# Sampling is "draw noise, denoise step by step".
+#
+# We build the forward process (no training; just visualise it), then —
+# **if a GPU is available** — train a tiny U-Net DDPM and visualise
+# samples from the trained reverse process.
+#
+# *(see MFML §"DDPM — forward and reverse process", §"Score matching")*
+
+# %%
+# Forward process visualisation.  No training; just q(x_t | x_0).
+T = 200                                                    # total diffusion steps
+betas = torch.linspace(1e-4, 0.02, T, device=DEVICE)       # linear schedule
+alphas = 1 - betas
+alpha_bars = torch.cumprod(alphas, dim=0)
+
+
+def q_sample(x0, t, eps=None):
+    """Sample x_t from x_0 in one step."""
+    if eps is None:
+        eps = torch.randn_like(x0)
+    a_bar = alpha_bars[t].view(-1, 1, 1, 1)
+    return torch.sqrt(a_bar) * x0 + torch.sqrt(1 - a_bar) * eps, eps
+
+
+# Plot forward trajectory of one CH image.
+x0_demo = X_tr[0:1]
+t_show = [0, 25, 50, 100, 150, 199]
+fig, axes = plt.subplots(1, 6, figsize=(13, 2.5))
+for i, t_i in enumerate(t_show):
+    t_tensor = torch.tensor([t_i], device=DEVICE)
+    x_t, _ = q_sample(x0_demo, t_tensor)
+    axes[i].imshow(x_t[0, 0].cpu().numpy(), cmap="gray")
+    axes[i].set_title(f"t = {t_i}", fontsize=9); axes[i].axis("off")
+plt.suptitle(f"DDPM forward process q(x_t | x_0) — CH image, T={T}")
+plt.tight_layout(); plt.show()
+
+
+# %%
+class TinyUNet(nn.Module):
+    """Minimal U-Net for the DDPM reverse process.  64x64 in/out;
+    sinusoidal time embedding; channel mults [16, 32, 64].
+
+    Designed to fit and train within ~3 min on a 1080 Ti GPU."""
+
+    def __init__(self, time_dim=64):
+        super().__init__()
+        self.time_dim = time_dim
+        self.time_mlp = nn.Sequential(
+            nn.Linear(time_dim, 128), nn.SiLU(), nn.Linear(128, 128),
+        )
+        self.in_conv = nn.Conv2d(1, 16, 3, padding=1)
+        self.down1 = nn.Sequential(nn.Conv2d(16, 32, 3, stride=2, padding=1), nn.SiLU())
+        self.down2 = nn.Sequential(nn.Conv2d(32, 64, 3, stride=2, padding=1), nn.SiLU())
+        self.mid = nn.Sequential(
+            nn.Conv2d(64, 64, 3, padding=1), nn.SiLU(),
+            nn.Conv2d(64, 64, 3, padding=1), nn.SiLU(),
+        )
+        self.up2 = nn.Sequential(nn.ConvTranspose2d(64, 32, 4, stride=2, padding=1), nn.SiLU())
+        self.up1 = nn.Sequential(nn.ConvTranspose2d(32, 16, 4, stride=2, padding=1), nn.SiLU())
+        self.out_conv = nn.Conv2d(16, 1, 3, padding=1)
+        # Project time embedding into each scale.
+        self.time_proj_mid = nn.Linear(128, 64)
+        self.time_proj_up2 = nn.Linear(128, 32)
+        self.time_proj_up1 = nn.Linear(128, 16)
+
+    def time_embedding(self, t):
+        half = self.time_dim // 2
+        freqs = torch.exp(-math.log(10000) * torch.arange(half, device=t.device) / half)
+        args = t[:, None].float() * freqs[None]
+        return torch.cat([args.sin(), args.cos()], dim=-1)
+
+    def forward(self, x, t):
+        t_emb = self.time_mlp(self.time_embedding(t))      # (B, 128)
+        h0 = self.in_conv(x)                               # (B, 16, 64, 64)
+        h1 = self.down1(h0)                                # (B, 32, 32, 32)
+        h2 = self.down2(h1)                                # (B, 64, 16, 16)
+        h_mid = self.mid(h2 + self.time_proj_mid(t_emb)[:, :, None, None])
+        u2 = self.up2(h_mid + self.time_proj_up2(t_emb)[:, :, None, None] * 0)
+        u2 = u2 + h1                                       # skip
+        u1 = self.up1(u2 + self.time_proj_up2(t_emb)[:, :, None, None])
+        u1 = u1 + h0
+        return self.out_conv(u1 + self.time_proj_up1(t_emb)[:, :, None, None])
+
+
+# %%
+if HAS_GPU:
+    print(f"GPU detected — training tiny DDPM ({T} steps, ~2-3 min on 1080Ti)")
+    torch.manual_seed(0)
+    unet = TinyUNet().to(DEVICE)
+    opt = torch.optim.Adam(unet.parameters(), lr=2e-4)
+    loader_ddpm = DataLoader(TensorDataset(X_tr), batch_size=32, shuffle=True)
+    n_epochs_ddpm = 20
+    for ep in range(n_epochs_ddpm):
+        unet.train()
+        losses = []
+        for (xb,) in loader_ddpm:
+            t = torch.randint(0, T, (xb.shape[0],), device=DEVICE)
+            x_t, eps = q_sample(xb, t)
+            eps_pred = unet(x_t, t)
+            loss = F.mse_loss(eps_pred, eps)
+            opt.zero_grad(); loss.backward(); opt.step()
+            losses.append(loss.item())
+        if ep % 4 == 0 or ep == n_epochs_ddpm - 1:
+            print(f"  epoch {ep:2d}  noise-prediction MSE = {np.mean(losses):.4f}")
+
+    # Sample 6 images from the trained reverse process.
+    @torch.no_grad()
+    def ddpm_sample(unet, n=6):
+        x = torch.randn(n, 1, 64, 64, device=DEVICE)
+        for t in reversed(range(T)):
+            t_tensor = torch.full((n,), t, device=DEVICE)
+            eps_pred = unet(x, t_tensor)
+            a_t = alphas[t]; a_bar_t = alpha_bars[t]
+            mean = (1 / torch.sqrt(a_t)) * (x - (betas[t] / torch.sqrt(1 - a_bar_t)) * eps_pred)
+            if t > 0:
+                noise = torch.randn_like(x)
+                sigma = torch.sqrt(betas[t])
+                x = mean + sigma * noise
+            else:
+                x = mean
+        return x.clamp(0, 1)
+
+    samples = ddpm_sample(unet, n=6)
+    fig, axes = plt.subplots(1, 6, figsize=(13, 2.5))
+    for i in range(6):
+        axes[i].imshow(samples[i, 0].cpu().numpy(), cmap="gray", vmin=0, vmax=1)
+        axes[i].axis("off"); axes[i].set_title(f"DDPM sample {i}", fontsize=9)
+    plt.suptitle("Samples from the trained DDPM reverse process")
+    plt.tight_layout(); plt.show()
+else:
+    print("No GPU detected — skipping DDPM training.")
+    print("The forward-process visualisation above is the qualitative point.")
+    print("On a GPU machine, the next cell would train a tiny U-Net DDPM in ~2-3 min.")
+
+
+# %% [markdown]
+# **Take-home from Block 4 (GPU branch).** The DDPM samples will be
+# rougher than the VAE samples — 200 timesteps and 20 epochs is *small*
+# for diffusion (real-world DDPMs use 1000+ timesteps and 100s of
+# epochs). The point of this block is the *recipe*, not the polish:
+# noise predictor + forward process + reverse loop = a generative model.
+#
+# **DDPM vs VAE — when to pick which?**
+#
+# - DDPM produces sharper samples *with enough training* — no posterior
+#   collapse, no blurry-mean-of-modes artefact.
+# - DDPM is much slower at sampling (N forward passes per sample, where
+#   N = T or N steps with DDIM-style acceleration).
+# - VAE sampling is one decode call — fast — but blurrier.
+# - **Conditional generation in a CVAE is one extra input** (Block 2);
+#   conditional generation in DDPM uses classifier guidance or
+#   classifier-free guidance, which is the next natural lecture topic.
+
+# %% [markdown]
+# # Block 5 — Materials latent-space arithmetic (MG W11)
+#
+# We now switch from CH images to crystal embeddings — the MG home turf.
+# Goal: in the *learned* embedding space, find the **stability axis** —
+# the direction that most decreases the predicted formation energy — and
+# verify that walking along that axis really does decrease energy under
+# the GNN's own predictor head.
+#
+# This is the cleanest "latent-space arithmetic for property targeting"
+# demo and it does *not* need a decoder: we only ask "where in the latent
+# space do stable crystals live?" and walk in that direction. The
+# *decoder* would be a graph generator (out of scope today).
+#
+# *(see MG §"Latent-space arithmetic for property targeting",
+# §"Composition-structure-property maps")*
+
+# %%
+# Train a fresh TinyCGNN (same as Week 6/9), extract embeddings, head, etc.
+class TinyCGNN(nn.Module):
+    def __init__(self, n_elements=120, embed_dim=16, n_layers=3):
+        super().__init__()
+        self.embed = nn.Embedding(n_elements, embed_dim)
+        self.msg_mlps = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(2 * embed_dim + 1, embed_dim), nn.ReLU(),
+                nn.Linear(embed_dim, embed_dim),
+            ) for _ in range(n_layers)
+        ])
+        self.head = nn.Sequential(
+            nn.Linear(embed_dim, 16), nn.ReLU(),
+            nn.Linear(16, 1),
+        )
+
+    def encode(self, species, edge_index, edge_distance):
+        h = self.embed(species)
+        for layer in self.msg_mlps:
+            src, dst = edge_index[0], edge_index[1]
+            msg_in = torch.cat([h[src], h[dst], edge_distance.unsqueeze(-1)], dim=-1)
+            msg = layer(msg_in)
+            agg = torch.zeros_like(h).index_add_(0, dst, msg)
+            h = h + agg
+        return h.mean(0)
+
+    def forward(self, species, edge_index, edge_distance):
+        return self.head(self.encode(species, edge_index, edge_distance)).squeeze(-1)
+
+
+cg = CrystalGraphsDataset()
+y_cg = cg.y; y_cg_mean = y_cg.mean().item(); y_cg_std = y_cg.std().item()
+
+torch.manual_seed(0)
+cgnn = TinyCGNN()
+opt_g = torch.optim.Adam(cgnn.parameters(), lr=5e-3)
+print("Training TinyCGNN (5 epochs)...")
+for ep in range(5):
+    cgnn.train()
+    losses = []
+    for i in torch.randperm(len(cg)).tolist():
+        s = cg[i]
+        yn = (s["y"] - y_cg_mean) / y_cg_std
+        opt_g.zero_grad()
+        p = cgnn(s["species"], s["edge_index"], s["edge_distance"])
+        loss = (p - yn) ** 2
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(cgnn.parameters(), 1.0)
+        opt_g.step()
+        losses.append(loss.item())
+    if ep % 2 == 0 or ep == 4:
+        print(f"  epoch {ep}  train MSE = {np.mean(losses):.4f}")
+
+cgnn.eval()
+with torch.no_grad():
+    embeds = torch.stack([
+        cgnn.encode(cg[i]["species"], cg[i]["edge_index"], cg[i]["edge_distance"])
+        for i in range(len(cg))
+    ])                                                     # (200, 16)
+    y_pred_all = torch.tensor([
+        cgnn(cg[i]["species"], cg[i]["edge_index"], cg[i]["edge_distance"]).item()
+        for i in range(len(cg))
+    ])
+    y_pred_all_de = y_pred_all * y_cg_std + y_cg_mean
+
+
+# %%
+# PCA-reduce embeddings to 2D for the visualisation.
+def pca_2d(X):
+    mu = X.mean(0, keepdim=True)
+    Xc = X - mu
+    cov = Xc.T @ Xc / (Xc.shape[0] - 1)
+    eigvals, eigvecs = torch.linalg.eigh(cov)
+    order = torch.argsort(eigvals, descending=True)
+    V = eigvecs[:, order][:, :2]
+    return Xc @ V, V, mu
+
+Z2, V2, mu_e = pca_2d(embeds)
+
+# Find the "stability axis": linear regression of (true) formation energy
+# on PCA-2D coordinates.  The negative of the regression gradient direction
+# is the steepest-descent axis for energy.
+y_true = cg.y                                              # 200 floats
+A = torch.cat([Z2, torch.ones(Z2.shape[0], 1)], dim=1)     # (200, 3)
+w, *_ = torch.linalg.lstsq(A, y_true.unsqueeze(1))
+coeffs = w[:2, 0]                                          # (2,) gradient in PCA-2D
+print(f"Stability axis in PCA-2D: ({coeffs[0]:+.3f}, {coeffs[1]:+.3f})")
+descent_dir = -coeffs / coeffs.norm()
+print(f"Steepest-descent direction (unit vector): ({descent_dir[0]:+.3f}, {descent_dir[1]:+.3f})")
+
+
+# %%
+# Pick a starting crystal and walk along the stability axis in 2D.  At
+# each step, build the corresponding 16-D embedding (just project back),
+# pass through the head, get the predicted energy.
+i_start = int((y_true.argsort()[100]).item())              # roughly median-energy crystal
+n_steps = 8; step_size = 1.0
+walk_2d = torch.stack([
+    Z2[i_start] + (k - n_steps // 2) * step_size * descent_dir
+    for k in range(n_steps)
+])                                                         # (n_steps, 2)
+# Lift back to 16-D: e_full = mu + Z @ V_2d^T  (only the 2D coords are
+# changed; we keep the residual orthogonal-component fixed).
+e_start = embeds[i_start]
+residual = e_start - mu_e[0] - Z2[i_start] @ V2.T
+walk_16d = mu_e[0] + walk_2d @ V2.T + residual
+
+cgnn.eval()
+with torch.no_grad():
+    walk_y_pred_n = cgnn.head(walk_16d).squeeze(-1)
+walk_y_pred = walk_y_pred_n * y_cg_std + y_cg_mean
+
+# Sanity check: walking along descent_dir should decrease the predicted energy.
+fig, (a1, a2) = plt.subplots(1, 2, figsize=(11, 4.4))
+for p_idx, pname in enumerate(cg.prototype_names):
+    m = (cg.prototype == p_idx).numpy()
+    a1.scatter(Z2[m, 0], Z2[m, 1], s=18, alpha=0.6, c=f"C{p_idx}", label=pname)
+a1.scatter(walk_2d[:, 0], walk_2d[:, 1], s=80, marker="o", facecolor="none",
+           edgecolor="k", lw=1.4, label="latent walk")
+a1.scatter([Z2[i_start, 0]], [Z2[i_start, 1]], s=120, marker="*",
+           c="red", label=f"start (idx {i_start})")
+a1.set_xlabel("embed PC1"); a1.set_ylabel("embed PC2")
+a1.set_title("Walk along the stability axis"); a1.legend(fontsize=8)
+
+a2.plot(walk_y_pred.numpy(), "o-", lw=1.6)
+a2.set_xlabel("step along descent_dir"); a2.set_ylabel("predicted formation energy (eV/atom)")
+a2.axhline(float(y_true[i_start]), ls=":", c="grey",
+           label=f"true energy of start = {y_true[i_start]:.2f}")
+a2.set_title("Predicted energy decreases along the stability axis")
+a2.legend(fontsize=9); plt.tight_layout(); plt.show()
+
+
+# %% [markdown]
+# **Reading the latent walk.** Two observations:
+#
+# 1. The walk crosses prototype clusters (left panel). The stability axis
+#    in the embedding tracks a direction that mixes prototype identity
+#    with chemistry — **stability is a multi-axis property**, and the
+#    embedding has captured both.
+# 2. The predicted energy decreases monotonically (right panel). This is
+#    the inverse-design payoff: if we had a *decoder GNN* (a model that
+#    turns a 16-D vector back into a crystal graph), this walk would give
+#    us a sequence of progressively-more-stable candidate crystals to
+#    propose for synthesis. Decoding crystal graphs is the active research
+#    frontier — papers like CDVAE and DiffCSP do exactly this.
+
+# %% [markdown]
+# # Block 6 — Honest limitations
+#
+# Three failure modes worth seeing now, before students reach for a VAE
+# in the wild.
+#
+# 1. **Posterior collapse.** Train at very high β (e.g. β = 8) and watch
+#    the KL go to zero — every encoder output collapses to the prior, and
+#    the decoder learns to ignore z entirely.
+# 2. **Mode collapse / lack of diversity.** Sample many times at the same
+#    target energy from a CVAE that didn't see enough training; the
+#    samples can be near-duplicates.
+# 3. **OOD targets.** Ask the CVAE for an energy *outside* the training
+#    range; the decoder hallucinates microstructures whose predicted
+#    energy is *closer to the training-range edge* than to the request.
+#
+# *(see ML-PC §"Failure modes of inverse design", §"Validation discipline
+# for generative models")*
+
+# %%
+# OOD demo only (the other two are exercise material).
+print("OOD-target demo: ask the CVAE for energies outside training range.")
+y_min, y_max = float(y_tr.min()), float(y_tr.max())
+print(f"Training-set energy range: [{y_min:.0f}, {y_max:.0f}]")
+ood_low = (y_min - y_std) - y_mean                         # 1 std below the min
+ood_high = (y_max + y_std) - y_mean                        # 1 std above the max
+ood_targets_n = [ood_low / y_std, ood_high / y_std]
+ood_labels = [f"{(ood_low+y_mean):.0f} (OOD low)", f"{(ood_high+y_mean):.0f} (OOD high)"]
+
+cvae.eval()
+with torch.no_grad():
+    fig, axes = plt.subplots(2, 4, figsize=(10, 5.5))
+    for r, (yt, lbl) in enumerate(zip(ood_targets_n, ood_labels)):
+        z = torch.randn(4, cvae.latent_dim, device=DEVICE)
+        y_t = torch.full((4,), yt, device=DEVICE)
+        samples = cvae.decode(z, y_t)
+        # Score with the regressor.
+        achieved = reg(samples) * y_std + y_mean
+        for c in range(4):
+            axes[r, c].imshow(samples[c, 0].cpu().numpy(), cmap="gray", vmin=0, vmax=1)
+            axes[r, c].axis("off")
+            axes[r, c].set_title(f"target {lbl}\nregressor says {achieved[c]:.0f}",
+                                 fontsize=8)
+plt.suptitle("CVAE under OOD targets — the regressor scores never reach the request")
+plt.tight_layout(); plt.show()
+
+
+# %% [markdown]
+# **Reading the OOD plot.** When asked for an energy outside the training
+# range, the CVAE produces something — but the regressor's score on that
+# something stays near the training-range edge. The model has no *prior*
+# for samples outside its data. This is the inverse-design version of
+# "extrapolation is not generalisation": *generative models are
+# interpolators, not extrapolators*. The discipline is to *measure* the
+# achieved property (with an independent regressor) and refuse to
+# advertise OOD candidates as valid.
+
+# %% [markdown]
+# # Block 7 — Student exercises (~18 min)
+
+# %% [markdown]
+# ## Exercise 1 (core) — Diversity-vs-accuracy in CVAE generation
+#
+# **Setup.** A good inverse-design generator should produce *diverse*
+# candidates with the *same* target property. Diverse + on-target = good.
+# Same-image-cloned + on-target = mode collapse. Different-images + off-target
+# = bad targeting.
+#
+# **Task.** For each of the 3 target energies in Block 2 (low / median /
+# high), generate 20 CVAE samples. For each cohort:
+#
+# 1. Compute mean ‖regressor(sample) − y_target‖ — the **accuracy**.
+# 2. Compute the within-cohort image-pixel variance (`samples.var(dim=0).mean()`)
+#    — the **diversity**.
+#
+# Plot accuracy vs diversity for the 3 cohorts. Where on the
+# diversity–accuracy plane does the CVAE land for each target?
+
+# %% [markdown]
+# ## Exercise 2 (core) — Latent-GD vs CVAE under OOD targets
+#
+# **Setup.** Block 6 showed that the CVAE silently misses OOD targets.
+# Latent-GD has a different failure mode: it can *visibly diverge* in
+# loss space (you see the curve plateau or oscillate), giving a more
+# honest "the model can't do this" signal.
+#
+# **Task.** Pick a target energy outside the training range (use one of
+# `ood_targets_n` from Block 6). Run both methods:
+#
+# 1. CVAE: sample 8 candidates conditioned on the OOD target. Score them.
+# 2. Latent-GD: run for 500 steps, plot the loss curve. Score the final z.
+#
+# Report which method's *output* is closer to the target, and which
+# method's *failure signal* is louder.
+
+# %% [markdown]
+# ## Exercise 3 (core) — The stability axis on a held-out prototype
+#
+# **Setup.** In Block 5 you fit the stability regression using all 5
+# prototypes' embeddings. The natural follow-up: does that same stability
+# axis still work when you didn't train it on the prototype you walk
+# from?
+#
+# **Task.** Pick one prototype (say `perovskite`). Refit the
+# 2-coefficient regression in Block 5 *only* on the embeddings of the
+# other 4 prototypes. Use that regression's descent direction to walk
+# along starting from a perovskite crystal. Does the GNN's predicted
+# energy still decrease along the walk?
+#
+# **Expected:** if the embedding's "stability geometry" is consistent
+# across prototypes, yes — and that means the latent-space arithmetic
+# generalises. If not, you've found a structural bias in the embedding
+# that any inverse-design pipeline built on it would inherit.
+
+# %% [markdown]
+# ---
+# **Bridge to Week 12.** Next week MFML moves to *uncertainty
+# quantification* (Gaussian processes, ensembles, conformal prediction)
+# and ML-PC pairs that with *uncertainty-aware discovery loops*. The
+# discipline this week — measuring achieved properties, refusing OOD
+# candidates, watching for posterior collapse — is the prerequisite for
+# *honest* discovery.
