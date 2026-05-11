@@ -343,3 +343,36 @@ for algo_name, results in [("KMeans", kmeans_results), ("GMM", gmm_results)]:
 summary = pd.DataFrame(summary_rows)
 summary
 ```
+
+## 7. Wrap-up
+
+```{python}
+fig, ax = plt.subplots(figsize=(7, 4))
+width = 0.35
+x = np.arange(len(summary))
+ax.bar(x - width / 2, summary["ARI"], width, label="ARI")
+ax.bar(x + width / 2, summary["NMI"], width, label="NMI")
+ax.set_xticks(x)
+ax.set_xticklabels([f"{r.algorithm}\n{r.features}" for r in summary.itertuples()],
+                   fontsize=9)
+ax.set_ylabel("score (higher = better)")
+ax.set_title("Clustering quality — 4 combinations on NEU-DET")
+ax.legend()
+ax.grid(axis="y", alpha=0.3)
+plt.tight_layout()
+plt.show()
+```
+
+### Takeaways
+
+- **Representation beats algorithm.** For both KMeans and GMM, ResNet18
+  embeddings cluster substantially better than raw-pixel features. The
+  features carry most of the signal; the choice between hard and soft
+  assignment is secondary.
+- **Some defects are easy, others are not.** Scratches and patches form
+  visually-coherent clusters; crazing and rolled-in_scale tend to be
+  conflated regardless of features. The contingency heatmaps make this
+  failure mode visible at a glance.
+- **GMM's soft assignments add interpretability, not accuracy here.**
+  Mean assignment entropy is informative ("which samples is the model
+  least sure about?") but ARI/NMI track KMeans closely.
