@@ -333,5 +333,43 @@ class ESTMDataset(Dataset):
 
 
 def _featurize_magpie(formulas: list[str]) -> tuple[np.ndarray, list[str], np.ndarray]:
-    """Stub — implemented in Task 6."""
-    raise NotImplementedError("Magpie featurization lands in Task 6")
+    """Return (X, columns, kept_mask) where X is (N_kept, ~133) of Magpie features.
+
+    Rows with unparseable formulas → kept_mask=False.
+    Column-median imputation for NaNs; rows still all-NaN → also dropped.
+    """
+    from matminer.featurizers.composition import ElementProperty
+    from pymatgen.core import Composition
+
+    featurizer = ElementProperty.from_preset("magpie")
+    columns = featurizer.feature_labels()
+
+    rows: list[np.ndarray] = []
+    kept = np.zeros(len(formulas), dtype=bool)
+    for i, f in enumerate(tqdm(formulas, desc="Magpie", unit="formula")):
+        try:
+            comp = Composition(f)
+            row = featurizer.featurize(comp)
+        except Exception:  # noqa: BLE001
+            continue
+        rows.append(np.asarray(row, dtype=np.float32))
+        kept[i] = True
+
+    X = np.vstack(rows) if rows else np.empty((0, len(columns)), dtype=np.float32)
+
+    # Column-median imputation.
+    col_medians = np.nanmedian(X, axis=0)
+    nan_mask = np.isnan(X)
+    if nan_mask.any():
+        X = np.where(nan_mask, col_medians, X).astype(np.float32)
+
+    # Drop rows that are still all-NaN (column median was NaN too).
+    still_bad = np.isnan(X).any(axis=1)
+    if still_bad.any():
+        # Need to map this back to the original index space: kept-True positions
+        # currently in row order — flip the corresponding kept entries off.
+        kept_indices = np.flatnonzero(kept)
+        kept[kept_indices[still_bad]] = False
+        X = X[~still_bad]
+
+    return X, list(columns), kept
