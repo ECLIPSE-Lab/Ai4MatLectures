@@ -12,3 +12,5 @@ imageio>=2.34
 scikit-learn>=1.4
 xgboost>=2.0
 torchvision>=0.16
+pymatgen>=2024.3
+matminer>=0.9
