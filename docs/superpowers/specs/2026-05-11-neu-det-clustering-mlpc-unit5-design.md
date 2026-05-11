@@ -42,8 +42,12 @@ Out of scope (YAGNI):
 
 ## Data layer — `ai4mat/datasets/neu_det.py`
 
-A new `NEUDETDataset(torch.utils.data.Dataset)` mirroring the shape of the
-existing `IsingDataset`.
+A new `NEUDETDataset(torch.utils.data.Dataset)` modelled on the existing
+`IsingDataset` (same `X` / `y` / `transform` / `target_transform` shape),
+but extending the API with `root`, `split`, `download`, `class_names`, and
+`image_paths` because the data lives on disk rather than coming from
+`mdsdata`. The extra attributes are called out explicitly below — this
+class is *not* a drop-in API match to IsingDataset.
 
 **Expected on-disk layout** (after unzipping the Kaggle archive):
 
@@ -85,12 +89,26 @@ class NEUDETDataset(Dataset):
 **Behaviour:**
 
 - If `download=True` and `root` is missing or empty, call
-  `download_if_missing(root)` which fetches the public URL
-  `https://www.kaggle.com/api/v1/datasets/download/kaustubhdikshit/neu-surface-defect-database`
-  to a temp file, unzips into `root`, and removes the temp.
-- Walks `<root>/<split-dirs>/images/<class>/*.jpg` (sorted by class name
-  for stable label indexing) and loads every image with
-  `imageio.v3.imread` (already a project dep).
+  `download_if_missing(root)` (specified below); this populates the
+  expected layout. If `download=False` and the data is absent, raise
+  `FileNotFoundError` with a one-line hint to set `download=True`.
+- After download, the dataset finds the `train/` directory: if
+  `<root>/train` is missing, it walks one level deeper looking for the
+  single subdirectory that contains `train/`, and rebinds `root` to that
+  subdirectory. (Kaggle archives sometimes unzip with a nested top-level
+  folder like `NEU-DET/NEU-DET/...` or `NEU Metal Surface Defects Data/`.)
+  If no such directory is found, raise a clear `FileNotFoundError`.
+- Walks `<root>/<split-dirs>/images/<class>/*.jpg` (class subdirs
+  discovered by `sorted(os.listdir(...))` so label indexing is stable
+  across machines) and loads every image with `imageio.v3.imread` (already
+  a project dep).
+- **Class-name normalisation**: discovered directory names are
+  lowercased; any `_` in the name is preserved, any `-` is preserved
+  (`rolled-in_scale` and `rolled_in_scale` are both recognised but the
+  string is stored verbatim). The dataset asserts exactly 6 classes; the
+  canonical class strings are exposed on `ds.class_names` as discovered
+  (no rewriting). Tests must check `len(ds.class_names) == 6` and set
+  containment of the lowercase tokens (see test section).
 - Asserts the image is 200×200 grayscale (NEU-DET nominal); converts to
   `float32` tensor of shape `(1, 200, 200)` in `[0, 1]` (matches IsingDataset).
 - Stores `self.X` as one `torch.float32` tensor of shape `(N, 1, 200, 200)`
@@ -98,22 +116,46 @@ class NEUDETDataset(Dataset):
 - Eager loading: ~1800 × 1 × 200 × 200 × 4 B ≈ 274 MB; acceptable for a
   lecture machine. Matches the load-everything-up-front idiom used by every
   other ai4mat dataset.
-- Exposes `self.class_names: list[str]` and `self.image_paths: list[str]`
-  (the latter is useful for the per-cluster tile plots, which need to load
-  the raw image again at higher resolution if we ever want to zoom).
+- Exposes `self.class_names: list[str]`, `self.image_paths: list[str]`,
+  `self.X`, `self.y` as **public attributes** — the notebook reads
+  `ds.X` / `ds.y` directly for the clustering steps rather than iterating
+  `__getitem__`.
+
+**`download_if_missing(root)` — spec:**
+
+- Streams the public URL
+  `https://www.kaggle.com/api/v1/datasets/download/kaustubhdikshit/neu-surface-defect-database`
+  with `urllib.request.urlopen`, writing chunks of 1 MB to
+  `<root>.tmp.zip` (in the parent dir of `root`).
+- Shows a `tqdm` progress bar (project already depends on `tqdm`) sized
+  from the `Content-Length` header when present, otherwise unbounded.
+- Before unzipping, sniffs the first 4 bytes: if they are not `PK\x03\x04`
+  (zip magic), raises `RuntimeError("Kaggle endpoint did not return a
+  zip — likely an auth redirect; download manually and place files in
+  data/NEU-DET/")` and deletes the temp file. Guards against the silent
+  "Kaggle returned an HTML login page" failure mode.
+- On success: unzips into `root` with `zipfile.ZipFile`, removes the temp
+  zip. Does not move nested directories — the dataset class handles
+  nesting on read (see above).
+- Idempotent: if `root` exists and contains a `train/` folder anywhere
+  one level deep, this function is a no-op.
 
 **Public API:**
 
 ```python
 ds = NEUDETDataset()                 # 1800 imgs, downloads if missing
 ds = NEUDETDataset(split="train")    # 1440 imgs
-ds = NEUDETDataset(download=False)   # error if data dir is empty
+ds = NEUDETDataset(download=False)   # FileNotFoundError if data dir is empty
 len(ds), ds[0][0].shape, ds[0][1]    # 1800, torch.Size([1,200,200]), tensor(0)
+ds.X.shape                           # torch.Size([1800, 1, 200, 200])
+ds.y.shape                           # torch.Size([1800])
 ds.class_names                       # ["crazing", "inclusion", ...]
+ds.image_paths                       # ["data/NEU-DET/train/images/crazing/...", ...]
 ```
 
-**Re-export:** add `from .neu_det import NEUDETDataset` and the entry in
-`__all__` of `ai4mat/datasets/__init__.py`.
+**Re-export:** append `"NEUDETDataset"` to the existing `__all__` list at
+the bottom of `ai4mat/datasets/__init__.py` (lines 10–19), and add
+`from .neu_det import NEUDETDataset` alongside the other imports.
 
 ## Notebook — `notebooks/MLPC/week05_clustering_neu_det.qmd`
 
@@ -260,10 +302,13 @@ def test_neu_det_basic():
     assert x.dtype == torch.float32
     assert 0.0 <= x.min().item() and x.max().item() <= 1.0
     assert set(ds.y.tolist()) == {0, 1, 2, 3, 4, 5}
-    assert ds.class_names == [
-        "crazing", "inclusion", "patches",
-        "pitted_surface", "rolled-in_scale", "scratches",
-    ]
+    # Robust to '-' vs '_' in class dir names ("rolled-in_scale" vs
+    # "rolled_in_scale"); only check core tokens are present.
+    assert len(ds.class_names) == 6
+    joined = " ".join(ds.class_names).lower()
+    for token in ["crazing", "inclusion", "patches",
+                  "pitted", "rolled", "scratches"]:
+        assert token in joined
 ```
 
 CI won't have the dataset, so the test is a no-op there; it provides a
@@ -291,13 +336,28 @@ local fast check after running the data download.
 
 ## Definition of done
 
+Each item below has a verification command in brackets — run it before
+calling the work complete.
+
 - `ai4mat/datasets/neu_det.py` written; re-exported.
+  [`python -c "from ai4mat.datasets import NEUDETDataset; print(NEUDETDataset.__doc__[:60])"`]
 - `NEUDETDataset()` downloads and loads 1800 images on a clean machine.
-- `notebooks/MLPC/week05_clustering_neu_det.qmd` runs end-to-end without
-  errors, produces all figures described above, and renders to HTML via
-  `quarto render`.
+  [`rm -rf data/NEU-DET && python -c "from ai4mat.datasets import NEUDETDataset; ds=NEUDETDataset(); assert len(ds)==1800, len(ds); print('OK', len(ds))"`]
+- `notebooks/MLPC/week05_clustering_neu_det.qmd` renders end-to-end via
+  Quarto and produces all named figures.
+  [`quarto render notebooks/MLPC/week05_clustering_neu_det.qmd` exits 0,
+  AND the rendered HTML contains at least one image per evaluation panel:
+  `grep -c '<img' _site/notebooks/MLPC/week05_clustering_neu_det.html`
+  returns ≥ 14 (1 class grid + 1 scree + 4 sweeps + 4 t-SNE + 4 tile grids
+  + 4 contingency + 1 summary; ≥14 is the conservative lower bound after
+  Quarto inlines some as `<svg>`).]
 - `index.qmd` updated.
+  [`grep "week05_clustering_neu_det" index.qmd` returns a match.]
 - `tests/test_neu_det_dataset.py` passes when the dataset is present,
   skips otherwise.
+  [`pytest tests/test_neu_det_dataset.py -v` passes locally;
+  `pytest tests/test_neu_det_dataset.py -v` in a fresh tmpdir with no
+  data prints "skipped".]
 - `requirements.txt` includes `torchvision>=0.16`.
+  [`grep '^torchvision' requirements.txt` returns a match.]
 - Committed on a feature branch.
