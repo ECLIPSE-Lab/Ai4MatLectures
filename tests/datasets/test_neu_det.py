@@ -1,8 +1,11 @@
 import os
+from pathlib import Path
+
 import pytest
 import torch
 
-DATA_DIR = "data/NEU-DET"
+# Anchor to repo root so the check works regardless of CWD when pytest runs.
+DATA_DIR = str(Path(__file__).resolve().parents[2] / "data" / "NEU-DET")
 
 
 def _data_present() -> bool:

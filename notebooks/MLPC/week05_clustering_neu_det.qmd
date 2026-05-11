@@ -305,8 +305,6 @@ for name, Z in [("raw+PCA", Z_pca), ("ResNet18", Z_resnet_std)]:
 ## 6. Evaluation panel — t-SNE, tiles, contingency for each (features × algorithm)
 
 ```{python}
-tsne = TSNE(n_components=2, perplexity=30, init="pca", random_state=0)
-
 # Cache t-SNE projections per feature set so we don't re-run for KMeans and GMM.
 tsne_proj = {}
 for name, Z in [("raw+PCA", Z_pca), ("ResNet18", Z_resnet_std)]:

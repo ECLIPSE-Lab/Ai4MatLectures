@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import tempfile
 import zipfile
 from pathlib import Path
 from typing import Optional
@@ -58,7 +59,13 @@ def download_if_missing(root: str) -> None:
     if _find_train_root(root) is not None:
         return
 
-    tmp_zip = os.path.join(os.path.dirname(root) or ".", "_neu_det_tmp.zip")
+    # Use NamedTemporaryFile so concurrent downloads don't collide on a
+    # fixed filename. The file is closed immediately; we reopen by path below.
+    tmp_parent = os.path.dirname(root) or "."
+    with tempfile.NamedTemporaryFile(
+        dir=tmp_parent, prefix="_neu_det_", suffix=".zip", delete=False
+    ) as tmp_handle:
+        tmp_zip = tmp_handle.name
     try:
         with urlopen(_KAGGLE_URL) as response:
             total = int(response.headers.get("Content-Length", 0)) or None
