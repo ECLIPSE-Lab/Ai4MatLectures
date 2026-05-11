@@ -47,7 +47,7 @@ scripts (Jupytext cell markers).
 | Week | Topic | Dataset | Notebook |
 |---|---|---|---|
 | 4 | Microstructure representations & CNN baseline | Alpaydin Digits / Ising | [week04_baseline_digits](notebooks/MLPC/week04_baseline_digits.html), [week05_cnn_ising_light](notebooks/MLPC/week05_cnn_ising_light.html), [week05_cnn_ising_full](notebooks/MLPC/week05_cnn_ising_full.html) |
-| 5 | Unsupervised learning in materials | Ising / Cahn-Hilliard | **braided:** [week5_clustering_and_autoencoders.py](notebooks/week5_clustering_and_autoencoders.py); per-course: [week11_anomaly_cahn_hilliard](notebooks/MLPC/week11_anomaly_cahn_hilliard.html) |
+| 5 | Unsupervised learning in materials | Ising / Cahn-Hilliard / NEU-DET | **braided:** [week5_clustering_and_autoencoders.py](notebooks/week5_clustering_and_autoencoders.py); per-course: [week05_clustering_neu_det](notebooks/MLPC/week05_clustering_neu_det.html), [week11_anomaly_cahn_hilliard](notebooks/MLPC/week11_anomaly_cahn_hilliard.html) |
 | 7 | Process monitoring & distribution shift | Tensile Test | **braided:** [week7_generalization_and_ensembles.py](notebooks/week7_generalization_and_ensembles.py); per-course: [week07_process_monitoring_tensile](notebooks/MLPC/week07_process_monitoring_tensile.html) |
 | 11 | Anomaly detection via AE (automation context) | Cahn-Hilliard | [week11_anomaly_cahn_hilliard](notebooks/MLPC/week11_anomaly_cahn_hilliard.html) |
 | 12 | UQ + Bayesian active learning | Tensile Test | **braided:** [week12_uncertainty_and_discovery.py](notebooks/week12_uncertainty_and_discovery.py) (Blocks 2–4) |
