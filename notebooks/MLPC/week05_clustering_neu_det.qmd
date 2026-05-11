@@ -218,4 +218,46 @@ def plot_contingency(y_true, y_pred, class_names, title=""):
     plt.show()
     return ari, nmi
 ```
+
+## 4. K-means
+
+```{python}
+def run_kmeans_sweep(Z, y_true, K_range=range(2, 11), seed=0):
+    sil, ari = [], []
+    for K in K_range:
+        km = KMeans(n_clusters=K, n_init=10, random_state=seed).fit(Z)
+        sil.append(silhouette_score(Z, km.labels_))
+        ari.append(adjusted_rand_score(y_true, km.labels_))
+    return list(K_range), sil, ari
+
+y_true = ds.y.numpy()
+
+for name, Z in [("raw+PCA", Z_pca), ("ResNet18", Z_resnet_std)]:
+    Ks, sil, ari = run_kmeans_sweep(Z, y_true)
+    fig, ax1 = plt.subplots(figsize=(6, 3.5))
+    ax1.plot(Ks, sil, "o-", color="C0", label="silhouette")
+    ax1.set_xlabel("K"); ax1.set_ylabel("silhouette", color="C0")
+    ax2 = ax1.twinx()
+    ax2.plot(Ks, ari, "s--", color="C3", label="ARI vs truth")
+    ax2.set_ylabel("ARI", color="C3")
+    ax1.axvline(6, color="gray", linestyle=":", alpha=0.6)
+    ax1.set_title(f"K-means sweep — {name}")
+    plt.tight_layout()
+    plt.show()
+
+# Fit K=6 once for each feature set and stash results.
+kmeans_results = {}
+for name, Z in [("raw+PCA", Z_pca), ("ResNet18", Z_resnet_std)]:
+    km = KMeans(n_clusters=6, n_init=10, random_state=0).fit(Z)
+    kmeans_results[name] = {
+        "labels": km.labels_,
+        "centroids": km.cluster_centers_,
+        "Z": Z,
+        # score for tile plot: higher = closer to centroid
+        "score": -np.linalg.norm(Z - km.cluster_centers_[km.labels_], axis=1),
+    }
+    ari = adjusted_rand_score(y_true, km.labels_)
+    nmi = normalized_mutual_info_score(y_true, km.labels_)
+    print(f"K-means K=6 on {name:9s}: ARI={ari:.3f}  NMI={nmi:.3f}")
+```
 ```
