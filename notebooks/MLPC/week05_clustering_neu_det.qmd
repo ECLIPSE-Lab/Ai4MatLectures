@@ -260,4 +260,44 @@ for name, Z in [("raw+PCA", Z_pca), ("ResNet18", Z_resnet_std)]:
     nmi = normalized_mutual_info_score(y_true, km.labels_)
     print(f"K-means K=6 on {name:9s}: ARI={ari:.3f}  NMI={nmi:.3f}")
 ```
+
+## 5. Gaussian Mixture (EM)
+
+```{python}
+def run_gmm_sweep(Z, K_range=range(2, 11), seed=0):
+    bics = []
+    for K in K_range:
+        gm = GaussianMixture(
+            n_components=K, covariance_type="diag", random_state=seed, n_init=3
+        ).fit(Z)
+        bics.append(gm.bic(Z))
+    return list(K_range), bics
+
+for name, Z in [("raw+PCA", Z_pca), ("ResNet18", Z_resnet_std)]:
+    Ks, bics = run_gmm_sweep(Z)
+    plt.figure(figsize=(6, 3.5))
+    plt.plot(Ks, bics, "o-")
+    plt.axvline(6, color="gray", linestyle=":", alpha=0.6)
+    plt.xlabel("K"); plt.ylabel("BIC (lower = better)")
+    plt.title(f"GMM BIC sweep — {name}")
+    plt.tight_layout()
+    plt.show()
+
+gmm_results = {}
+for name, Z in [("raw+PCA", Z_pca), ("ResNet18", Z_resnet_std)]:
+    gm = GaussianMixture(
+        n_components=6, covariance_type="diag", random_state=0, n_init=3
+    ).fit(Z)
+    labels = gm.predict(Z)
+    resp = gm.predict_proba(Z)
+    gmm_results[name] = {
+        "labels": labels,
+        "Z": Z,
+        # score for tile plot: max responsibility (assignment confidence)
+        "score": resp.max(axis=1),
+    }
+    ari = adjusted_rand_score(y_true, labels)
+    nmi = normalized_mutual_info_score(y_true, labels)
+    ent = -(resp * np.log(resp + 1e-12)).sum(axis=1).mean()
+    print(f"GMM K=6 on {name:9s}: ARI={ari:.3f}  NMI={nmi:.3f}  mean-entropy={ent:.3f}")
 ```
