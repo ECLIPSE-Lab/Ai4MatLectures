@@ -258,22 +258,54 @@ Colab badge under the title, then learning objectives:
 
 ### Slide-figure save helper (notebook-local)
 
-A 6-line helper at the top of the notebook:
+`_quarto.yml` sets `execute-dir: project`, so the notebook's runtime cwd is
+the `Ai4MatLectures/` project root, not `notebooks/MLPC/`. The slide deck
+lives at `/home/philipp/projects/_public_presentations/...`, and
+`SS26/_public_presentations` is a symlink to it (verified via `readlink -f`
+at spec time); from the project root that path is one level up. The helper
+must therefore:
+
+1. Resolve target via env var `ESTM_SLIDE_IMG_DIR` if set, else fall back to
+   the relative path `../_public_presentations/ml_for_characterization_and_processing/unit05_unsupervised_learning/images/estm`.
+2. **Only `mkdir` the final `estm/` leaf, and only if the parent
+   `images/` already exists.** This is what guards against the
+   "phantom `_public_presentations` tree silently materialises inside
+   `Ai4MatLectures/`" failure mode the spec reviewer flagged.
+3. If the parent does not exist, fall back to a notebook-local
+   `figs/estm/` directory (created), and print a one-line warning with
+   the resolved absolute path of both candidates so the human sees why
+   PNGs aren't reaching the slide repo.
 
 ```python
+import os, warnings
 from pathlib import Path
-SLIDE_IMG_DIR = Path("../../_public_presentations/ml_for_characterization_and_processing/unit05_unsupervised_learning/images/estm")
-SLIDE_IMG_DIR.mkdir(parents=True, exist_ok=True)
+
+def _resolve_slide_img_dir() -> Path:
+    env = os.environ.get("ESTM_SLIDE_IMG_DIR")
+    target = Path(env) if env else Path(
+        "../_public_presentations/ml_for_characterization_and_processing/"
+        "unit05_unsupervised_learning/images/estm"
+    )
+    if target.parent.exists():
+        target.mkdir(exist_ok=True)
+        return target
+    fallback = Path("figs/estm")
+    fallback.mkdir(parents=True, exist_ok=True)
+    warnings.warn(
+        f"slide-deck images parent {target.parent.resolve()} not found; "
+        f"writing slide PNGs to {fallback.resolve()} instead"
+    )
+    return fallback
+
+SLIDE_IMG_DIR = _resolve_slide_img_dir()
 def save_slide_fig(fig, name):
     fig.savefig(SLIDE_IMG_DIR / f"{name}.png", dpi=200, bbox_inches="tight")
 ```
 
 Each headline figure is rendered inline (Quarto handles this) *and*
 explicitly saved through `save_slide_fig(fig, "elbow_silhouette")` etc., so
-one `quarto render` produces both HTML and the six slide PNGs.
-
-The path is `../../` relative to `notebooks/MLPC/` because Quarto chdirs
-into the notebook directory at render time.
+one `quarto render` produces both HTML and the six slide PNGs (or, in the
+fallback case, six local PNGs and an audible warning).
 
 ### Runtime budget (CPU)
 
@@ -396,9 +428,14 @@ calling the work complete.
   [`rm -rf data/estm && python -c "from ai4mat.datasets import ESTMDataset; ds=ESTMDataset(); assert len(ds)>4500, len(ds); print('OK', len(ds))"`]
 - `notebooks/MLPC/week05_clustering_estm.qmd` renders end-to-end via
   Quarto and produces all named figures inline *and* writes the six PNGs
-  to the slide-image folder.
+  to the slide-deck image folder (verified by resolving via the symlink,
+  not against a phantom local tree).
   [`quarto render notebooks/MLPC/week05_clustering_estm.qmd` exits 0,
-  AND `ls _public_presentations/ml_for_characterization_and_processing/unit05_unsupervised_learning/images/estm/*.png | wc -l` is ≥ 6.]
+  AND
+  `ls /home/philipp/projects/_public_presentations/ml_for_characterization_and_processing/unit05_unsupervised_learning/images/estm/*.png | wc -l`
+  is ≥ 6,
+  AND `find Ai4MatLectures/_public_presentations -type d 2>/dev/null` is
+  empty (no phantom tree was created inside the repo).]
 - `index.qmd` updated.
   [`grep "week05_clustering_estm" index.qmd` returns a match.]
 - `tests/datasets/test_estm.py` passes when the CSV is present, skips
