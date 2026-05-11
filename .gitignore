@@ -9,3 +9,4 @@ dist/
 .env
 _site/
 /.quarto/
+data/NEU-DET/
