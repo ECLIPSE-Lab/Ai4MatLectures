@@ -129,3 +129,93 @@ else:
 
 Z_resnet_std = (Z_resnet - Z_resnet.mean(axis=0)) / (Z_resnet.std(axis=0) + 1e-8)
 ```
+
+## Helpers — plot routines used across both features × both algorithms
+
+```{python}
+def hungarian_remap(y_true, y_pred, K):
+    """Return a permutation `perm` of cluster ids so that the diagonal of
+    crosstab(y_true, perm[y_pred]) is maximal. Used for visual alignment
+    only; metrics like ARI/NMI are permutation-invariant.
+
+    Assumes the number of predicted clusters equals the number of true
+    classes (the case throughout this notebook). For unequal counts you'd
+    need to handle leftover rows/columns separately.
+    """
+    K_true = int(y_true.max()) + 1
+    assert K == K_true, (
+        f"hungarian_remap assumes K==K_true; got K={K}, K_true={K_true}"
+    )
+    C = np.zeros((K, K_true), dtype=int)
+    for k in range(K):
+        for c in range(K_true):
+            C[k, c] = int(((y_pred == k) & (y_true == c)).sum())
+    # Maximise diagonal -> minimise -C
+    row_ind, col_ind = linear_sum_assignment(-C)
+    perm = np.zeros(K, dtype=int)
+    perm[row_ind] = col_ind
+    return perm
+
+def plot_tsne_dual(Z2, y_true, y_pred, class_names, title):
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4.5))
+    for ax, lbl, name in zip(axes, [y_true, y_pred], ["true class", "predicted cluster"]):
+        sc = ax.scatter(Z2[:, 0], Z2[:, 1], c=lbl, cmap="tab10", s=8, alpha=0.7)
+        ax.set_title(f"{name}")
+        ax.set_xticks([]); ax.set_yticks([])
+    plt.suptitle(title, y=1.02)
+    if len(class_names) <= 10:
+        handles = [plt.Line2D([0], [0], marker="o", linestyle="", markersize=6,
+                              color=plt.cm.tab10(i)) for i in range(len(class_names))]
+        fig.legend(handles, class_names, loc="lower center", ncol=len(class_names),
+                   bbox_to_anchor=(0.5, -0.05), frameon=False, fontsize=8)
+    plt.tight_layout()
+    plt.show()
+
+def plot_cluster_tiles(ds, y_pred, score_per_sample, n_per=6, title=""):
+    """For each cluster, plot the n_per samples with the highest score
+    (e.g. -dist-to-centroid for KMeans, or component responsibility for GMM)."""
+    K = int(y_pred.max()) + 1
+    fig, axes = plt.subplots(K, n_per, figsize=(1.1 * n_per, 1.1 * K))
+    for k in range(K):
+        in_cluster = np.where(y_pred == k)[0]
+        order = in_cluster[np.argsort(-score_per_sample[in_cluster])]
+        picks = order[:n_per]
+        for j in range(n_per):
+            ax = axes[k, j] if K > 1 else axes[j]
+            if j < len(picks):
+                ax.imshow(ds.X[picks[j], 0].numpy(), cmap="gray", vmin=0, vmax=1)
+            ax.set_xticks([]); ax.set_yticks([])
+            if j == 0:
+                ax.set_ylabel(f"c{k}", fontsize=8, rotation=0, labelpad=14)
+    plt.suptitle(title, y=1.0)
+    plt.tight_layout()
+    plt.show()
+
+def plot_contingency(y_true, y_pred, class_names, title=""):
+    K = int(y_pred.max()) + 1
+    perm = hungarian_remap(y_true, y_pred, K)
+    y_pred_aligned = perm[y_pred]
+    df = pd.crosstab(
+        pd.Series(y_true, name="true"),
+        pd.Series(y_pred_aligned, name="cluster (aligned)"),
+    )
+    df.index = [class_names[i] for i in df.index]
+    ari = adjusted_rand_score(y_true, y_pred)
+    nmi = normalized_mutual_info_score(y_true, y_pred)
+
+    fig, ax = plt.subplots(figsize=(5.5, 4))
+    im = ax.imshow(df.values, cmap="viridis")
+    ax.set_xticks(range(df.shape[1])); ax.set_xticklabels(df.columns)
+    ax.set_yticks(range(df.shape[0])); ax.set_yticklabels(df.index)
+    for i in range(df.shape[0]):
+        for j in range(df.shape[1]):
+            ax.text(j, i, int(df.values[i, j]), ha="center", va="center",
+                    color="white" if df.values[i, j] < df.values.max() / 2 else "black",
+                    fontsize=8)
+    ax.set_title(f"{title}\nARI={ari:.3f}  NMI={nmi:.3f}")
+    plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    plt.tight_layout()
+    plt.show()
+    return ari, nmi
+```
+```
