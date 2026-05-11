@@ -258,3 +258,90 @@ fig.colorbar(sc, ax=axes, label="ZT", shrink=0.85)
 save_slide_fig(fig, "pca_scatter_by_zt")
 plt.show()
 ```
+
+## 6. Per-cluster material families and property enrichment
+
+```{python}
+def top_elements_per_cluster(formulas, labels, n=5):
+    rows = []
+    for c in sorted(set(labels)):
+        members = [f for f, l in zip(formulas, labels) if l == c]
+        elems = Counter(_dominant_element(f) for f in members).most_common(n)
+        rows.append({"cluster": c, "n": len(members),
+                     "top_elements": ", ".join(f"{e}({k})" for e, k in elems)})
+    return pd.DataFrame(rows)
+
+summary = top_elements_per_cluster(ds_mag.formulas, labels_mag, n=5).set_index("cluster")
+for col in ["ZT", "S", "sigma", "kappa", "PF"]:
+    summary[f"median_{col}"] = (
+        pd.Series(ds_mag.properties[col].to_numpy())
+          .groupby(labels_mag).median().values
+    )
+summary
+```
+
+```{python}
+fig, axes = plt.subplots(1, 4, figsize=(16, 4))
+prop_names = ["ZT", "S", "sigma", "kappa"]
+log_axes = {"sigma": True, "kappa": True}
+for ax, p in zip(axes, prop_names):
+    data = [
+        ds_mag.properties[p].to_numpy()[labels_mag == c]
+        for c in sorted(set(labels_mag))
+    ]
+    ax.boxplot(data, labels=sorted(set(labels_mag)), showfliers=False)
+    ax.set_title(p)
+    ax.set_xlabel("magpie cluster")
+    if log_axes.get(p):
+        ax.set_yscale("log")
+fig.tight_layout()
+save_slide_fig(fig, "property_box_per_cluster")
+plt.show()
+```
+
+```{python}
+T_vals = ds_mag.T.numpy()
+T_bins = np.array([300, 400, 500, 600, 700, 800, 900, 1100])
+T_centres = 0.5 * (T_bins[:-1] + T_bins[1:])
+
+fig, ax = plt.subplots(figsize=(8, 5))
+ZT = ds_mag.properties["ZT"].to_numpy()
+for c in sorted(set(labels_mag)):
+    m = labels_mag == c
+    if m.sum() < 20:
+        continue
+    bin_id = np.digitize(T_vals[m], T_bins) - 1
+    medians = [
+        np.nanmedian(ZT[m][bin_id == b]) if (bin_id == b).any() else np.nan
+        for b in range(len(T_centres))
+    ]
+    ax.plot(T_centres, medians, "o-", label=f"cluster {c} ({dom_mag[c]})")
+ax.set_xlabel("Temperature (K)")
+ax.set_ylabel("median ZT")
+ax.set_title("Median ZT vs T, per Magpie cluster")
+ax.legend(fontsize=9)
+fig.tight_layout()
+save_slide_fig(fig, "zt_by_cluster_vs_T")
+plt.show()
+```
+
+## 7. Wrap-up
+
+**Takeaways**
+
+- *Featurization choice dominates the cluster structure.* Magpie descriptors
+  separate chalcogenides from skutterudites / half-Heuslers cleanly; raw
+  element-fraction features mostly recover "which element is dominant" and
+  miss subtler family structure.
+- *Cluster identity correlates with high ZT.* A small number of Magpie
+  clusters concentrate the top-decile ZT entries — exactly the materials-
+  discovery signal we want from unsupervised methods.
+- *This is one step short of Na & Chang's SIMD.* Their representation
+  learns a clustering-aware projection from a graph over similar materials.
+  Magpie + K-means is the unsupervised baseline; SIMD is the natural
+  follow-up if you want to extrapolate beyond seen families.
+
+**References**
+
+- Na, G. S. & Chang, H. *npj Comput. Mater.* **8**, 214 (2022). DOI: 10.1038/s41524-022-00897-2
+- Ward, L. et al. *npj Comput. Mater.* **2**, 16028 (2016) — Magpie descriptors.
