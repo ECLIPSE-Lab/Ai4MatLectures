@@ -1,0 +1,114 @@
+---
+title: "MLPC Week 5: Clustering thermoelectric materials (ESTM)"
+subtitle: "PCA + K-means on element-fraction and Magpie features"
+jupyter: python3
+---
+
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/ECLIPSE-Lab/Ai4MatLectures/blob/main/notebooks/MLPC/week05_clustering_estm.ipynb)
+
+## Learning Objectives
+
+- Apply K-means to a tabular materials dataset with quantitative property targets.
+- Understand how featurization choice (raw fractions vs Magpie physics-aware descriptors) changes cluster geometry.
+- Use elbow + silhouette together to motivate a cluster count.
+- Read per-cluster property distributions as a sanity check that clusters mean something.
+- Connect this workflow to materials discovery (Na & Chang 2022 / SIMD).
+
+## Setup
+
+```{python}
+#| eval: false
+!pip install git+https://github.com/ECLIPSE-Lab/Ai4MatLectures.git "pymatgen>=2024.3" "matminer>=0.9"
+```
+
+```{python}
+import os
+import warnings
+from collections import Counter
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+from sklearn.cluster import KMeans
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import silhouette_score
+
+from ai4mat.datasets import ESTMDataset
+
+np.random.seed(0)
+warnings.filterwarnings("ignore", category=UserWarning, module="matminer")
+```
+
+### Slide-figure save helper
+
+```{python}
+def _resolve_slide_img_dir() -> Path:
+    env = os.environ.get("ESTM_SLIDE_IMG_DIR")
+    target = Path(env) if env else Path(
+        "../_public_presentations/ml_for_characterization_and_processing/"
+        "unit05_unsupervised_learning/images/estm"
+    )
+    # parents=False on purpose: do NOT silently create _public_presentations/.
+    if target.parent.exists():
+        target.mkdir(exist_ok=True)
+        return target
+    fallback = Path("figs/estm")
+    fallback.mkdir(parents=True, exist_ok=True)
+    warnings.warn(
+        f"slide-deck images parent {target.parent.resolve()} not found; "
+        f"writing slide PNGs to {fallback.resolve()} instead"
+    )
+    return fallback
+
+SLIDE_IMG_DIR = _resolve_slide_img_dir()
+
+def save_slide_fig(fig, name):
+    fig.savefig(SLIDE_IMG_DIR / f"{name}.png", dpi=200, bbox_inches="tight")
+
+print(f"Slide images → {SLIDE_IMG_DIR.resolve()}")
+```
+
+## 1. Dataset preview
+
+```{python}
+ds_frac = ESTMDataset(features="fraction", standardize=True)
+ds_mag = ESTMDataset(features="magpie", standardize=True)
+print(f"fraction: X={tuple(ds_frac.X.shape)}, y={tuple(ds_frac.y.shape)}")
+print(f"magpie:   X={tuple(ds_mag.X.shape)}, y={tuple(ds_mag.y.shape)}")
+print("temperature range:", ds_frac.T.min().item(), "-", ds_frac.T.max().item(), "K")
+```
+
+```{python}
+def _dominant_element(formula: str) -> str:
+    from pymatgen.core import Composition
+    comp = Composition(formula).fractional_composition.as_dict()
+    return max(comp, key=comp.get)
+
+dom = [_dominant_element(f) for f in ds_frac.formulas]
+top_elements = [e for e, _ in Counter(dom).most_common(15)]
+T_bins = pd.cut(ds_frac.T.numpy(), bins=[0, 400, 600, 800, 1500],
+                labels=["≤400 K", "400-600 K", "600-800 K", ">800 K"])
+preview = (
+    pd.DataFrame({"dom": dom, "Tbin": T_bins})
+      .query("dom in @top_elements")
+      .pipe(lambda d: pd.crosstab(d["dom"], d["Tbin"]))
+      .loc[top_elements]
+)
+preview
+```
+
+## 2. Feature pipeline A — element fractions + T
+
+```{python}
+X_frac = ds_frac.X.numpy()
+pca_frac_10 = PCA(n_components=10, random_state=0).fit(X_frac)
+pca_frac_2  = PCA(n_components=2,  random_state=0).fit(X_frac)
+Z_frac10 = pca_frac_10.transform(X_frac)
+Z_frac2  = pca_frac_2.transform(X_frac)
+
+cumvar = np.cumsum(pca_frac_10.explained_variance_ratio_)
+print(f"fraction PCA-10 cumulative variance: {cumvar[-1]:.2%}")
+```
