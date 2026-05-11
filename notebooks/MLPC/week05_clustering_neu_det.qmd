@@ -67,3 +67,26 @@ plt.suptitle("NEU-DET — 6 random examples per defect class", y=0.92)
 plt.tight_layout()
 plt.show()
 ```
+
+## 2. Feature pipeline A — raw pixels + PCA(50)
+
+```{python}
+X_flat = ds.X.reshape(len(ds), -1).numpy()           # (1800, 40000)
+X_flat_std = (X_flat - X_flat.mean(axis=0)) / (X_flat.std(axis=0) + 1e-8)
+
+pca = PCA(n_components=50, random_state=0)
+Z_pca = pca.fit_transform(X_flat_std)                # (1800, 50)
+print(f"Z_pca shape: {Z_pca.shape}")
+print(f"Cumulative explained variance @ 50 comps: {pca.explained_variance_ratio_.sum():.3f}")
+```
+
+```{python}
+plt.figure(figsize=(6, 3.5))
+plt.plot(np.arange(1, 51), np.cumsum(pca.explained_variance_ratio_), marker="o", ms=3)
+plt.xlabel("PCA component")
+plt.ylabel("cumulative explained variance")
+plt.title("Scree — raw pixels (40000-d) → PCA")
+plt.grid(alpha=0.3)
+plt.tight_layout()
+plt.show()
+```
