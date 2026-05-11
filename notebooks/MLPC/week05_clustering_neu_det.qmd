@@ -301,3 +301,45 @@ for name, Z in [("raw+PCA", Z_pca), ("ResNet18", Z_resnet_std)]:
     ent = -(resp * np.log(resp + 1e-12)).sum(axis=1).mean()
     print(f"GMM K=6 on {name:9s}: ARI={ari:.3f}  NMI={nmi:.3f}  mean-entropy={ent:.3f}")
 ```
+
+## 6. Evaluation panel — t-SNE, tiles, contingency for each (features × algorithm)
+
+```{python}
+tsne = TSNE(n_components=2, perplexity=30, init="pca", random_state=0)
+
+# Cache t-SNE projections per feature set so we don't re-run for KMeans and GMM.
+tsne_proj = {}
+for name, Z in [("raw+PCA", Z_pca), ("ResNet18", Z_resnet_std)]:
+    print(f"running t-SNE on {name} ...")
+    tsne_proj[name] = TSNE(
+        n_components=2, perplexity=30, init="pca", random_state=0
+    ).fit_transform(Z)
+```
+
+```{python}
+summary_rows = []
+for algo_name, results in [("KMeans", kmeans_results), ("GMM", gmm_results)]:
+    for feat_name in ["raw+PCA", "ResNet18"]:
+        r = results[feat_name]
+        labels = r["labels"]
+        Z2 = tsne_proj[feat_name]
+
+        plot_tsne_dual(
+            Z2, y_true, labels, ds.class_names,
+            title=f"{algo_name} on {feat_name}",
+        )
+        plot_cluster_tiles(
+            ds, labels, r["score"], n_per=6,
+            title=f"{algo_name} on {feat_name} — exemplar tiles per cluster",
+        )
+        ari, nmi = plot_contingency(
+            y_true, labels, ds.class_names,
+            title=f"{algo_name} on {feat_name}",
+        )
+        summary_rows.append(
+            dict(features=feat_name, algorithm=algo_name, ARI=ari, NMI=nmi)
+        )
+
+summary = pd.DataFrame(summary_rows)
+summary
+```
