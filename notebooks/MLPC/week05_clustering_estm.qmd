@@ -181,3 +181,80 @@ km_mag  = KMeans(n_clusters=K_star_mag,  n_init=10, random_state=0).fit(Z_mag10)
 labels_frac = km_frac.labels_
 labels_mag  = km_mag.labels_
 ```
+
+## 5. Cluster visualisation in PCA space
+
+```{python}
+def cluster_dominant_elements(formulas, labels) -> dict[int, str]:
+    out: dict[int, str] = {}
+    for c in sorted(set(labels)):
+        members = [f for f, l in zip(formulas, labels) if l == c]
+        elems = [_dominant_element(f) for f in members]
+        out[c] = Counter(elems).most_common(1)[0][0]
+    return out
+
+dom_frac = cluster_dominant_elements(ds_frac.formulas, labels_frac)
+dom_mag  = cluster_dominant_elements(ds_mag.formulas,  labels_mag)
+print("fraction cluster → dominant element:", dom_frac)
+print("magpie cluster   → dominant element:", dom_mag)
+```
+
+```{python}
+def scatter_clusters(ax, Z2, labels, centroids_2d, dom_map, title):
+    cmap = plt.cm.tab10
+    for c in sorted(set(labels)):
+        m = labels == c
+        ax.scatter(Z2[m, 0], Z2[m, 1], s=6, alpha=0.5,
+                   color=cmap(c % 10), label=f"{c}: {dom_map[c]}")
+    ax.scatter(centroids_2d[:, 0], centroids_2d[:, 1],
+               s=180, marker="*", color="black", edgecolors="white", linewidths=1.2)
+    for c, (cx, cy) in enumerate(centroids_2d):
+        ax.annotate(dom_map[c], (cx, cy), textcoords="offset points",
+                    xytext=(6, 6), fontsize=10, weight="bold")
+    ax.set_xlabel("PC1")
+    ax.set_ylabel("PC2")
+    ax.set_title(title)
+    ax.legend(loc="best", fontsize=8, markerscale=2)
+
+# Centroids of the 10-D clusters projected into 2-D PCA space.
+cent_frac_2d = pca_frac_2.transform(
+    pca_frac_10.inverse_transform(km_frac.cluster_centers_)
+)
+cent_mag_2d = pca_mag_2.transform(
+    pca_mag_10.inverse_transform(km_mag.cluster_centers_)
+)
+
+fig, ax = plt.subplots(figsize=(7, 6))
+scatter_clusters(ax, Z_frac2, labels_frac, cent_frac_2d, dom_frac,
+                 "Element-fraction features — K-means clusters")
+fig.tight_layout()
+save_slide_fig(fig, "pca_scatter_fraction")
+plt.show()
+```
+
+```{python}
+fig, ax = plt.subplots(figsize=(7, 6))
+scatter_clusters(ax, Z_mag2, labels_mag, cent_mag_2d, dom_mag,
+                 "Magpie features — K-means clusters")
+fig.tight_layout()
+save_slide_fig(fig, "pca_scatter_magpie")
+plt.show()
+```
+
+```{python}
+ZT_vals = ds_frac.properties["ZT"].to_numpy()
+vmin, vmax = 0.0, float(np.nanquantile(ZT_vals, 0.99))
+fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+for ax, Z2, title in [
+    (axes[0], Z_frac2, "fraction features"),
+    (axes[1], Z_mag2,  "magpie features"),
+]:
+    sc = ax.scatter(Z2[:, 0], Z2[:, 1], c=ZT_vals, s=8, alpha=0.7,
+                    cmap="viridis", vmin=vmin, vmax=vmax)
+    ax.set_xlabel("PC1")
+    ax.set_ylabel("PC2")
+    ax.set_title(title)
+fig.colorbar(sc, ax=axes, label="ZT", shrink=0.85)
+save_slide_fig(fig, "pca_scatter_by_zt")
+plt.show()
+```
