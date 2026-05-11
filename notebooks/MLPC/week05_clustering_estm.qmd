@@ -112,3 +112,72 @@ Z_frac2  = pca_frac_2.transform(X_frac)
 cumvar = np.cumsum(pca_frac_10.explained_variance_ratio_)
 print(f"fraction PCA-10 cumulative variance: {cumvar[-1]:.2%}")
 ```
+
+## 3. Feature pipeline B — Magpie descriptors + T
+
+```{python}
+X_mag = ds_mag.X.numpy()
+pca_mag_10 = PCA(n_components=10, random_state=0).fit(X_mag)
+pca_mag_2  = PCA(n_components=2,  random_state=0).fit(X_mag)
+Z_mag10 = pca_mag_10.transform(X_mag)
+Z_mag2  = pca_mag_2.transform(X_mag)
+
+cumvar = np.cumsum(pca_mag_10.explained_variance_ratio_)
+print(f"magpie PCA-10 cumulative variance: {cumvar[-1]:.2%}")
+
+# Inspect top loadings of PC1/PC2 to see which Magpie descriptors dominate.
+loadings = pd.DataFrame(
+    pca_mag_2.components_.T,
+    index=ds_mag.feature_names,
+    columns=["PC1", "PC2"],
+)
+print("Top 5 by |PC1|:\n", loadings["PC1"].abs().nlargest(5))
+print("Top 5 by |PC2|:\n", loadings["PC2"].abs().nlargest(5))
+```
+
+## 4. K-means + elbow / silhouette on both feature sets
+
+```{python}
+def k_sweep(Z, k_values):
+    inertias, sils = [], []
+    for k in k_values:
+        km = KMeans(n_clusters=k, n_init=10, random_state=0).fit(Z)
+        inertias.append(km.inertia_)
+        sils.append(silhouette_score(Z, km.labels_))
+    return np.array(inertias), np.array(sils)
+
+K_VALUES = np.arange(2, 13)
+frac_inertia, frac_sil = k_sweep(Z_frac10, K_VALUES)
+mag_inertia,  mag_sil  = k_sweep(Z_mag10,  K_VALUES)
+
+K_star_frac = int(K_VALUES[np.argmax(frac_sil)])
+K_star_mag  = int(K_VALUES[np.argmax(mag_sil)])
+print(f"K* (fraction features) = {K_star_frac}")
+print(f"K* (Magpie features)   = {K_star_mag}")
+```
+
+```{python}
+fig, axes = plt.subplots(1, 2, figsize=(11, 4))
+for ax, inertia, sil, label, K_star in [
+    (axes[0], frac_inertia, frac_sil, "fraction", K_star_frac),
+    (axes[1], mag_inertia,  mag_sil,  "magpie",   K_star_mag),
+]:
+    ax.plot(K_VALUES, inertia / inertia.max(), "o-", label="inertia (norm.)")
+    ax.plot(K_VALUES, sil / sil.max(),         "s-", label="silhouette (norm.)")
+    ax.axvline(K_star, color="k", linestyle=":", alpha=0.5, label=f"K* = {K_star}")
+    ax.set_title(f"{label} features")
+    ax.set_xlabel("K")
+    ax.set_xticks(K_VALUES)
+    ax.legend(loc="best", fontsize=9)
+axes[0].set_ylabel("score (max-normalised)")
+fig.tight_layout()
+save_slide_fig(fig, "elbow_silhouette")
+plt.show()
+```
+
+```{python}
+km_frac = KMeans(n_clusters=K_star_frac, n_init=10, random_state=0).fit(Z_frac10)
+km_mag  = KMeans(n_clusters=K_star_mag,  n_init=10, random_state=0).fit(Z_mag10)
+labels_frac = km_frac.labels_
+labels_mag  = km_mag.labels_
+```
