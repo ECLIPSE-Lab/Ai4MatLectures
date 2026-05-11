@@ -129,8 +129,8 @@ def test_neu_det_split_train_only():
     assert len(ds_val) == 360     # 60 per class * 6
 
 
-@skip_if_no_data
 def test_neu_det_download_false_errors_on_empty(tmp_path):
+    # Doesn't depend on the dataset being downloaded — runs in CI too.
     from ai4mat.datasets import NEUDETDataset
 
     empty_root = str(tmp_path / "empty")
@@ -189,18 +189,34 @@ _KAGGLE_URL = (
 )
 
 
-def _find_train_root(root: str) -> Optional[str]:
+def _find_train_root(root: str, max_depth: int = 2) -> Optional[str]:
     """Return the dir that directly contains `train/`; None if not found.
 
-    Kaggle archives sometimes unzip with an extra nested directory, so
-    look one level down as well.
+    Kaggle archives unzip with varying nesting (`NEU-DET/train/...`,
+    `NEU-DET/NEU-DET/train/...`, or `NEU Metal Surface Defects Data/.../train/...`),
+    so search up to `max_depth` levels below `root`.
     """
+    if not os.path.isdir(root):
+        return None
     if os.path.isdir(os.path.join(root, "train")):
         return root
-    for entry in sorted(os.listdir(root)) if os.path.isdir(root) else []:
-        candidate = os.path.join(root, entry)
-        if os.path.isdir(candidate) and os.path.isdir(os.path.join(candidate, "train")):
-            return candidate
+
+    stack: list[tuple[str, int]] = [(root, 0)]
+    while stack:
+        current, depth = stack.pop()
+        if depth >= max_depth:
+            continue
+        try:
+            entries = sorted(os.listdir(current))
+        except OSError:
+            continue
+        for entry in entries:
+            candidate = os.path.join(current, entry)
+            if not os.path.isdir(candidate):
+                continue
+            if os.path.isdir(os.path.join(candidate, "train")):
+                return candidate
+            stack.append((candidate, depth + 1))
     return None
 
 
@@ -422,7 +438,7 @@ If the print shows a wrong length, inspect `data/NEU-DET/` layout (`find data/NE
 - [ ] **Step 2: Run the full dataset test suite**
 
 Run: `pytest tests/datasets/test_neu_det.py -v`
-Expected: all 7 tests pass (none skipped, since data is now present).
+Expected: 7 passed (one of them — `test_neu_det_download_false_errors_on_empty` — runs without needing the dataset; the rest pass now that data is present).
 
 - [ ] **Step 3: Confirm .gitignore covers data/**
 
@@ -654,8 +670,16 @@ Insert this section between Section 3 and (the future) Section 4. It defines thr
 def hungarian_remap(y_true, y_pred, K):
     """Return a permutation `perm` of cluster ids so that the diagonal of
     crosstab(y_true, perm[y_pred]) is maximal. Used for visual alignment
-    only; metrics like ARI/NMI are permutation-invariant."""
+    only; metrics like ARI/NMI are permutation-invariant.
+
+    Assumes the number of predicted clusters equals the number of true
+    classes (the case throughout this notebook). For unequal counts you'd
+    need to handle leftover rows/columns separately.
+    """
     K_true = int(y_true.max()) + 1
+    assert K == K_true, (
+        f"hungarian_remap assumes K==K_true; got K={K}, K_true={K_true}"
+    )
     C = np.zeros((K, K_true), dtype=int)
     for k in range(K):
         for c in range(K_true):
@@ -1039,7 +1063,8 @@ git commit -m "docs(index): link MLPC week 5 NEU-DET clustering notebook"
 - [ ] **Step 1: Run every dataset test**
 
 Run: `pytest tests/datasets/test_neu_det.py -v`
-Expected: 7 passed, 0 skipped.
+Expected: 7 passed, 0 skipped. (The `tmp_path` test runs regardless of
+whether NEU-DET is downloaded; the rest skip when data is absent.)
 
 - [ ] **Step 2: Confirm clean state**
 

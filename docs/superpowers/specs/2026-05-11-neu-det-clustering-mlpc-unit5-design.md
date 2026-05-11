@@ -28,7 +28,7 @@ In scope:
 - A `download_if_missing()` helper that fetches the public Kaggle URL into
   `data/NEU-DET/` and unzips it.
 - An entry in `index.qmd` under the MLPC table.
-- One smoke test in `tests/test_neu_det_dataset.py`.
+- One smoke test in `tests/datasets/test_neu_det.py`.
 - Adding `torchvision>=0.16` to `requirements.txt`.
 
 Out of scope (YAGNI):
@@ -280,7 +280,7 @@ alongside the existing references:
 [week11_anomaly_cahn_hilliard](...) |
 ```
 
-### Test — `tests/test_neu_det_dataset.py`
+### Test — `tests/datasets/test_neu_det.py`
 
 A single file with one smoke test, skipped when the data isn't present:
 
@@ -353,10 +353,10 @@ calling the work complete.
   Quarto inlines some as `<svg>`).]
 - `index.qmd` updated.
   [`grep "week05_clustering_neu_det" index.qmd` returns a match.]
-- `tests/test_neu_det_dataset.py` passes when the dataset is present,
+- `tests/datasets/test_neu_det.py` passes when the dataset is present,
   skips otherwise.
-  [`pytest tests/test_neu_det_dataset.py -v` passes locally;
-  `pytest tests/test_neu_det_dataset.py -v` in a fresh tmpdir with no
+  [`pytest tests/datasets/test_neu_det.py -v` passes locally;
+  `pytest tests/datasets/test_neu_det.py -v` in a fresh tmpdir with no
   data prints "skipped".]
 - `requirements.txt` includes `torchvision>=0.16`.
   [`grep '^torchvision' requirements.txt` returns a match.]
