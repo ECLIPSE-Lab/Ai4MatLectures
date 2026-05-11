@@ -1,6 +1,9 @@
 project:
   type: website
   output-dir: _site
+  # Run all notebooks from the project root so relative paths like
+  # `data/NEU-DET/...` resolve the same way they do for `pytest` / `python -m`.
+  execute-dir: project
 
 website:
   title: "Ai4MatLectures"
