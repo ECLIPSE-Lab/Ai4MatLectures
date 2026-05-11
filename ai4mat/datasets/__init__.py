@@ -7,6 +7,7 @@ from .chemical_elements import ChemicalElementsDataset
 from .nanoindentation import NanoindentationDataset
 from .neu_det import NEUDETDataset
 from .crystal_graphs import CrystalGraphsDataset
+from .estm import ESTMDataset
 
 __all__ = [
     "IrisDataset",
@@ -18,4 +19,5 @@ __all__ = [
     "NanoindentationDataset",
     "NEUDETDataset",
     "CrystalGraphsDataset",
+    "ESTMDataset",
 ]

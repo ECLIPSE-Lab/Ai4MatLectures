@@ -176,3 +176,162 @@ def download_if_missing(root: str) -> None:
         "Download manually from https://github.com/ngs00/SIMD "
         f"(dataset/ESTM.csv) and place it at {dest}"
     )
+
+
+# pymatgen's full element list, used for fraction featurization.
+def _periodic_table_symbols() -> list[str]:
+    from pymatgen.core import Element
+    return [el.symbol for el in Element]
+
+
+def _featurize_fraction(formulas: list[str]) -> tuple[np.ndarray, list[str], np.ndarray]:
+    """Return (X, columns, kept_mask) where X is (N_kept, 118) of element fractions.
+
+    Formulas that fail pymatgen parsing are recorded as False in `kept_mask`.
+    """
+    from pymatgen.core import Composition
+
+    symbols = _periodic_table_symbols()
+    idx = {s: i for i, s in enumerate(symbols)}
+    X = np.zeros((len(formulas), len(symbols)), dtype=np.float32)
+    kept = np.ones(len(formulas), dtype=bool)
+    for i, f in enumerate(formulas):
+        try:
+            comp = Composition(f)
+            frac = comp.fractional_composition.as_dict()
+            for sym, v in frac.items():
+                X[i, idx[sym]] = float(v)
+        except Exception:  # noqa: BLE001 — drop unparseable rows
+            kept[i] = False
+    return X[kept], list(symbols), kept
+
+
+class ESTMDataset(Dataset):
+    """ESTM thermoelectric dataset (Na & Chang 2022) as a PyTorch Dataset.
+
+    Loads 5205 experimental observations across ~880 compounds with
+    measurement temperature and five thermoelectric properties.
+
+    Features are computed lazily on first instantiation and cached as
+    `<root>/features_<mode>.npz`. Subsequent loads skip featurization
+    entirely.
+
+    X shape: (F,) where F = 119 (fraction+T) or ~134 (magpie+T)
+    y shape: () (single target) or (5,) (target="all")
+    """
+
+    def __init__(
+        self,
+        root: str = "data/estm",
+        features: str = "fraction",
+        target: str = "ZT",
+        download: bool = True,
+        standardize: bool = False,
+        transform=None,
+        target_transform=None,
+    ):
+        if features not in {"fraction", "magpie"}:
+            raise ValueError(f"features must be 'fraction' or 'magpie', got {features!r}")
+        allowed_targets = {"ZT", "S", "sigma", "kappa", "PF", "all"}
+        if target not in allowed_targets:
+            raise ValueError(f"target must be one of {allowed_targets}, got {target!r}")
+
+        self.root = Path(root)
+        self.features = features
+        self.target = target
+        self.transform = transform
+        self.target_transform = target_transform
+
+        csv = self.root / "ESTM.csv"
+        if not csv.exists():
+            if download:
+                download_if_missing(str(self.root))
+            else:
+                raise FileNotFoundError(
+                    f"{csv} not found. Set download=True or place the file manually."
+                )
+
+        cache = self.root / f"features_{features}.npz"
+        if cache.exists():
+            data = np.load(cache, allow_pickle=True)
+            X = data["X"].astype(np.float32)
+            self.feature_names = list(data["columns"])
+            self.formulas = list(data["formulas"])
+            self.T = torch.from_numpy(data["T"].astype(np.float32))
+            self.properties = pd.DataFrame(
+                {k: data[k] for k in ["ZT", "S", "sigma", "kappa", "PF"]}
+            )
+        else:
+            X, feature_names, formulas, T, props = self._build_features(csv)
+            self.feature_names = feature_names
+            self.formulas = formulas
+            self.T = T
+            self.properties = props
+            np.savez(
+                cache,
+                X=X,
+                columns=np.array(feature_names),
+                formulas=np.array(formulas),
+                T=T.numpy(),
+                **{c: props[c].to_numpy() for c in props.columns},
+            )
+
+        if standardize:
+            from sklearn.preprocessing import StandardScaler
+            self.scaler = StandardScaler().fit(X)
+            X = self.scaler.transform(X).astype(np.float32)
+        else:
+            self.scaler = None
+
+        self.X = torch.from_numpy(X).float()
+        self.y = self._build_target()
+
+    def _build_features(self, csv: Path):
+        df = pd.read_csv(csv)
+        df = _canonicalise_columns(df).dropna(subset=["formula", "T", "ZT"])
+        df = df.reset_index(drop=True)
+
+        formulas_in = df["formula"].astype(str).tolist()
+        if self.features == "fraction":
+            X_no_T, columns, kept = _featurize_fraction(formulas_in)
+        else:
+            X_no_T, columns, kept = _featurize_magpie(formulas_in)
+
+        df = df.loc[kept].reset_index(drop=True)
+        n_dropped = int((~kept).sum())
+        if n_dropped:
+            warnings.warn(
+                f"Dropped {n_dropped} ESTM rows with unparseable formulas "
+                f"({n_dropped / len(kept):.1%} of the dataset)"
+            )
+
+        T = df["T"].to_numpy(dtype=np.float32)
+        X = np.concatenate([X_no_T, T[:, None]], axis=1).astype(np.float32)
+        columns = columns + ["T"]
+        formulas = df["formula"].tolist()
+        props = df[["ZT", "S", "sigma", "kappa", "PF"]].astype(np.float32).copy()
+        return X, columns, formulas, torch.from_numpy(T), props
+
+    def _build_target(self) -> torch.Tensor:
+        if self.target == "all":
+            return torch.from_numpy(
+                self.properties[["ZT", "S", "sigma", "kappa", "PF"]]
+                .to_numpy(dtype=np.float32)
+            )
+        return torch.from_numpy(self.properties[self.target].to_numpy(dtype=np.float32))
+
+    def __len__(self):
+        return len(self.X)
+
+    def __getitem__(self, idx):
+        x, y = self.X[idx], self.y[idx]
+        if self.transform:
+            x = self.transform(x)
+        if self.target_transform:
+            y = self.target_transform(y)
+        return x, y
+
+
+def _featurize_magpie(formulas: list[str]) -> tuple[np.ndarray, list[str], np.ndarray]:
+    """Stub — implemented in Task 6."""
+    raise NotImplementedError("Magpie featurization lands in Task 6")
