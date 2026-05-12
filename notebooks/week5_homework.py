@@ -7,7 +7,7 @@
 # 90 minutes on the harder question: **soft assignments and learned latent
 # codes on the *same* unlabelled microstructure data.**
 #
-# **Time:** ~75 minutes.
+# **Time:** ~85 minutes.
 #
 # ## What this homework is
 #
@@ -23,8 +23,8 @@
 # |---|---:|---|---|
 # | A | 25 | Lloyd's algorithm from scratch on 2-D blobs | MFML §"K-Means as an optimization problem", §"Lloyd's algorithm" |
 # | B | 20 | Bad init → local minimum; k-means++; multi-restart; elbow + silhouette | MFML §"Convergence and local minima", §"Choosing K" |
-# | C | 20 | `NanoindentationDataset` (E, H) — *standardise first*; ARI vs labels | ML-PC §"What unsupervised buys you", §"Validation problem without labels" |
-# | D | 10 | Reflection: leakage in the *unlabelled* setting | bridge to Thursday Block 6 |
+# | C | 30 | Standardisation on synthetic (E, H) blobs, then a reality-check on real Cu/Cr nanoindentation | ML-PC §"What unsupervised buys you", §"Validation problem without labels" |
+# | D | 10 | Reflection: leakage in the *unlabelled* setting | ML-PC §"Specimen leakage" |
 #
 # ## What you must hand in (or be able to show on Thursday)
 #
@@ -32,8 +32,10 @@
 #    hand-rolled Lloyd loop on the 2-D blobs.
 # 2. Part B: bar plot of $J_{\text{KM}}$ across 20 random restarts (uniform
 #    init vs k-means++) **and** an elbow + silhouette plot for K = 1..8.
-# 3. Part C: scatter of nanoindentation (E, H) coloured by your K=4 cluster
-#    assignment; printed adjusted-Rand index against the held-out labels.
+# 3. Part C: two three-panel scatters — synthetic (E, H)-like blobs and real
+#    nanoindentation — and the four ARI numbers above them; plus one
+#    sentence on why standardisation rescues the synthetic case but not the
+#    real one.
 # 4. Part D: your written answer to the leakage reflection (1 paragraph).
 
 # %%
@@ -243,25 +245,110 @@ plt.show()
 
 
 # %% [markdown]
-# # Part C — Real materials data: clustering nanoindentation (E, H)
+# # Part C — When standardisation matters: a synthetic-then-real story
 #
-# The `NanoindentationDataset` contains 938 measurements of Young's modulus
-# $E$ (GPa) and hardness $H$ (GPa) on Cu/Cr composites with four nominal
-# Cr content levels (0 / 25 / 60 / 100 %). The labels exist *for evaluation
-# only* — the metallurgist's day-to-day question is "are there really four
-# regimes in this batch, and which specimen lands in which?".
+# Two short subsections, one lesson, one cliffhanger.
 #
-# Two practical points this exercise drives home:
-#
-# 1. **Standardise first.** $E$ ranges ~50–200 GPa, $H$ ranges ~1–10 GPa.
-#    Without standardisation, Euclidean distance is dominated by $E$ and the
-#    cluster boundaries are essentially horizontal lines — a feature-scale
-#    artefact, not a data fact.
-# 2. **Validate without labels first, *then* peek.** Compute internal
-#    diagnostics (silhouette, elbow) on the unlabelled data; only at the
-#    very end do we compare to the held-out labels via adjusted-Rand index.
+# - **C.1 (synthetic, ~10 min):** the cleanest possible demonstration of
+#   why standardisation matters when features have different units.
+# - **C.2 (real, ~20 min):** the same recipe on real Cu/Cr nanoindentation
+#   data — and a confrontation with the limits of what K-means can recover
+#   when the labels you care about aren't in the features you have.
 #
 # *(see ML-PC §"What unsupervised buys you", §"Validation problem without labels")*
+
+
+# %% [markdown]
+# ## C.1 — Synthetic blobs in (E, H)-like units
+#
+# Imagine four hypothetical alloy phases. Two of them share a Young's modulus
+# of ~120 GPa and two share ~350 GPa; *within* each E-pair, the phases
+# differ only in hardness $H$. This is the geometric configuration where
+# raw-feature K-means is *forced* to fail: the inter-cluster gap in $E$
+# (~230 GPa) dwarfs the inter-cluster gap in $H$ (~2 GPa), so raw Euclidean
+# distance is essentially "distance in $E$", and the $H$-split is invisible.
+
+# %%
+# Four synthetic phases. Two pairs share an E centre and differ only in H.
+rng_syn = np.random.default_rng(0)
+centers = np.array([
+    [120.0, 1.0],   # phase 0: low E, soft
+    [120.0, 3.0],   # phase 1: low E, hard       — same E as phase 0
+    [350.0, 2.0],   # phase 2: high E, soft
+    [350.0, 4.5],   # phase 3: high E, very hard — same E as phase 2
+])
+stds = np.array([15.0, 0.3])    # E-spread is ~50x H-spread, like real (E, H)
+n_per = 150
+
+X_syn = np.concatenate([
+    centers[k] + stds * rng_syn.standard_normal((n_per, 2))
+    for k in range(4)
+])
+y_syn = np.repeat(np.arange(4), n_per)
+print(f"synthetic: N={len(X_syn)}   "
+      f"E in [{X_syn[:, 0].min():.0f}, {X_syn[:, 0].max():.0f}] GPa   "
+      f"H in [{X_syn[:, 1].min():.2f}, {X_syn[:, 1].max():.2f}] GPa")
+
+
+# %%
+# K-means on RAW vs STANDARDISED. Same algorithm, same K, only scaling differs.
+km_syn_raw = KMeans(n_clusters=4, n_init=10, random_state=0).fit(X_syn)
+
+mu_syn, sd_syn = X_syn.mean(axis=0), X_syn.std(axis=0)
+X_syn_s = (X_syn - mu_syn) / sd_syn
+km_syn_std = KMeans(n_clusters=4, n_init=10, random_state=0).fit(X_syn_s)
+
+ari_syn_raw = adjusted_rand_score(y_syn, km_syn_raw.labels_)
+ari_syn_std = adjusted_rand_score(y_syn, km_syn_std.labels_)
+print(f"synthetic, RAW          features: ARI vs phase labels = {ari_syn_raw:.3f}")
+print(f"synthetic, STANDARDISED features: ARI vs phase labels = {ari_syn_std:.3f}")
+
+
+# %%
+# Three-panel comparison on the synthetic data.
+fig, axes = plt.subplots(1, 3, figsize=(15, 4.5))
+for ax, c, title in zip(
+    axes,
+    [y_syn, km_syn_raw.labels_, km_syn_std.labels_],
+    ["true phases (4 synthetic)",
+     f"K-means on raw (E, H)   ARI={ari_syn_raw:.2f}",
+     f"K-means on standardised (E, H)   ARI={ari_syn_std:.2f}"],
+):
+    ax.scatter(X_syn[:, 0], X_syn[:, 1], c=c, cmap="tab10", s=14, alpha=0.7)
+    ax.set_xlabel("E (GPa)"); ax.set_ylabel("H (GPa)"); ax.set_title(title)
+plt.tight_layout()
+plt.show()
+
+
+# %% [markdown]
+# **What you should see.** Raw K-means slices the data along the $E$ axis
+# only — the 230 GPa gap between phase-pairs dwarfs the 2 GPa $H$-gap, so
+# phases 0/1 (both at $E\!\approx\!120$) are merged and phases 2/3 (both at
+# $E\!\approx\!350$) are merged. The "extra" two clusters are spent
+# splitting each $E$-mode along $E$ itself, because that's where the
+# variance lives in raw units. Standardisation puts $E$ and $H$ on equal
+# footing, the $H$-split becomes legible to the algorithm, and ARI jumps
+# from ~0.3 to ≈1.0.
+#
+# **This is the standardisation lesson, full stop:** when features have
+# different units, raw Euclidean distance is a fiction — K-means is
+# effectively clustering on whichever feature has the largest numerical
+# range.
+
+
+# %% [markdown]
+# ## C.2 — Real Cu/Cr nanoindentation: same recipe, harder reality
+#
+# Now the *same* pipeline on real data. The `NanoindentationDataset` contains
+# 938 measurements of Young's modulus $E$ (GPa) and hardness $H$ (GPa) on
+# Cu/Cr composites with four nominal Cr-content levels (0 / 25 / 60 / 100 %).
+# The labels exist *for evaluation only* — the metallurgist's day-to-day
+# question is "are there really four regimes in this batch, and which
+# specimen lands in which?".
+#
+# **Critical caveat before you run anything:** in C.1 we *designed* the
+# labels to be present in the (E, H) geometry. Real labels are a different
+# story, and what happens next is the reason Thursday's session exists.
 
 # %%
 ds = NanoindentationDataset()
@@ -272,7 +359,7 @@ print(f"raw ranges:  E in [{Xn[:, 0].min():.1f}, {Xn[:, 0].max():.1f}]   H in [{
 
 
 # %%
-# K-means on RAW vs STANDARDISED features. Both with K=4, k-means++ init.
+# K-means on RAW vs STANDARDISED. Identical recipe to C.1.
 km_raw  = KMeans(n_clusters=4, n_init=10, random_state=0).fit(Xn)
 
 mu_, sd_ = Xn.mean(axis=0), Xn.std(axis=0)
@@ -302,10 +389,56 @@ plt.show()
 
 
 # %% [markdown]
-# **Part C deliverable:** the three-panel scatter and the two ARI numbers
-# printed above it. The standardised version should outperform the raw one
-# substantially — that single preprocessing decision matters more than the
-# choice of clustering algorithm.
+# **What you should see — and why C.1 was a controlled lie.** Both ARI
+# numbers are mediocre (around 0.1) and **standardisation barely moves the
+# needle**. The reason is structural, not a bug:
+#
+# - The true labels (left panel) form a **continuous diagonal manifold** in
+#   $(E, H)$. All four Cr-content classes overlap heavily; the 25 % and
+#   60 % populations are essentially inseparable, and the 100 % Cr cluster
+#   is buried inside the others near the origin.
+# - K-means *does* find four clean clusters in this data — they just aren't
+#   the Cr-content labels. They are the four geometric regimes the
+#   $(E, H)$ scatter actually contains.
+#
+# This is the failure mode the lecture spent time on: **clustering recovers
+# geometry, not semantics.** When the labels you care about don't live in
+# your features, no amount of algorithmic sophistication can conjure them.
+# Standardisation didn't fail — it did its job (compare the cluster
+# geometry between the raw and standardised panels: vertical bands vs
+# diagonal regimes), the data just doesn't carry the Cr-content signal in
+# two dimensions.
+#
+# **Thursday's question.** What do we actually do when K-means on the
+# features we have cannot recover the labels we want? Thursday explores
+# three answers in sequence:
+#
+# 1. **Relax the assignment** — soft, probabilistic membership via
+#    GMM/EM, and the realisation that K-means is just GMM with frozen,
+#    isotropic, $\sigma^2\!\to\!0$ covariances (Blocks 2–3).
+# 2. **Change the representation** — on a different materials dataset
+#    (NEU-DET steel-surface defects) where the labels *do* live in the
+#    pixels, we compare a linear baseline (PCA) against a non-linear
+#    autoencoder and pretrained image features (Blocks 4–5).
+# 3. **Change the question** — use the trained autoencoder's
+#    reconstruction error as an anomaly score instead of chasing semantic
+#    labels (Block 6).
+#
+# The C.2 result above is the warning shot for *all* of these: when
+# geometry and semantics disagree, no clustering algorithm rescues you on
+# its own — feature engineering and problem framing do.
+
+
+# %% [markdown]
+# **Part C deliverables:**
+#
+# 1. The synthetic three-panel scatter (C.1) with its two ARI numbers —
+#    showing the *big* gap between raw and standardised.
+# 2. The real-nanoindentation three-panel scatter (C.2) with its two ARI
+#    numbers — showing the *small* gap, and a Cr-content scatter that
+#    clearly doesn't separate into four blobs.
+# 3. One sentence in your own words: *why* standardisation rescued the
+#    synthetic case but not the real one.
 
 
 # %% [markdown]
@@ -340,3 +473,5 @@ plt.show()
 
 # %% [markdown]
 # > *(your reflection paragraph here)*
+
+# %%
