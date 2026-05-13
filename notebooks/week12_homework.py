@@ -420,7 +420,7 @@ print("=" * 72)
 
 
 # %% [markdown]
-# # Part C — Calibration *and* split-conformal coverage on `TensileTestDataset(T=600)`
+# # Part C — Calibration on `TensileTestDataset(T=600)`
 #
 # A predictive interval is **calibrated** if the empirical fraction of test
 # points it covers matches the nominal level. Saying "this is my 95%
@@ -524,97 +524,13 @@ plt.show()
 
 
 # %% [markdown]
-# ## Split-conformal coverage on top of the same GP
-#
-# A reliability diagram is *diagnostic*: it tells you whether your GP's
-# Gaussian intervals happen to be calibrated. **Split-conformal prediction**
-# [@angelopoulos_2023_conformal] is *prescriptive*: given any black-box
-# point predictor $\hat{f}$ and a held-out calibration set, it builds
-# intervals with a **finite-sample, distribution-free coverage guarantee**
-# of $\ge 1 - \alpha$, as long as calibration and test data are exchangeable.
-#
-# Recipe (same predictor, no retraining):
-#
-# 1. Carve a fresh **calibration** set and a fresh **test** set from the
-#    pool, both disjoint from the GP's training data.
-# 2. Compute non-conformity scores $s_i = |y_i - \hat{f}(x_i)|$ on
-#    calibration.
-# 3. Take $\hat{q} = $ empirical $\lceil (n_{\text{cal}} + 1)(1 - \alpha)
-#    \rceil / n_{\text{cal}}$-quantile of the scores (for $\alpha = 0.1$,
-#    target coverage = 0.9).
-# 4. Emit intervals $\hat{f}(x) \pm \hat{q}$ on test; measure empirical
-#    coverage.
-
-# %%
-# Carve a clean three-way split out of the un-touched T=600 pool, without
-# leaking into the GP's training set above. We re-use the existing
-# permutation `perm` from line 453 but partition the *test* slice further
-# into calibration (1000 rows max, capped by what is available) and a
-# fresh test set.
-n_cal = min(150, len(te_idx) // 2)      # cap at 150 since T=600 only has 350 rows total
-cal_idx = te_idx[:n_cal]
-te_idx_fresh = te_idx[n_cal:]
-X_cal,  y_cal  = X_T600[cal_idx],      y_T600[cal_idx]
-X_te_c, y_te_c = X_T600[te_idx_fresh], y_T600[te_idx_fresh]
-print(f"split-conformal: train={len(X_tr)}   calib={len(X_cal)}   test={len(X_te_c)}")
-
-# Non-conformity scores |y - f(x)| on calibration using the *same* GP `gp_t`.
-mu_cal, _ = gp_t.predict(X_cal, return_std=True)
-scores_cal = np.abs(y_cal - mu_cal)
-
-alpha = 0.1
-# Finite-sample correction: take the ceil((n+1)(1-alpha))/n quantile.
-q_level = np.ceil((len(scores_cal) + 1) * (1 - alpha)) / len(scores_cal)
-q_level = min(q_level, 1.0)
-q_hat = float(np.quantile(scores_cal, q_level))
-print(f"alpha={alpha}   q-level on calib = {q_level:.4f}   q_hat = {q_hat:.2f} MPa")
-
-# Emit intervals on the fresh test set: f(x) +- q_hat.
-mu_te_c, _ = gp_t.predict(X_te_c, return_std=True)
-in_band = np.abs(y_te_c - mu_te_c) <= q_hat
-emp_cov_conf = float(in_band.mean())
-print(f"empirical conformal coverage on fresh test = {emp_cov_conf:.3f}   (target = {1 - alpha:.2f})")
-
-
-# %%
-# Plot: y_test vs f(x_test); horizontal +- q_hat band around the diagonal;
-# colour points by in/out of band.
-fig, ax = plt.subplots(figsize=(6.5, 5.5))
-y_lo = np.minimum(y_te_c.min(), mu_te_c.min())
-y_hi = np.maximum(y_te_c.max(), mu_te_c.max())
-diag = np.linspace(y_lo, y_hi, 200)
-ax.plot(diag, diag,         "k--", lw=1, alpha=0.6, label="ideal $y = \\hat{f}(x)$")
-ax.plot(diag, diag + q_hat, color="#1f77b4", lw=1, alpha=0.6)
-ax.plot(diag, diag - q_hat, color="#1f77b4", lw=1, alpha=0.6,
-        label=f"$\\pm \\hat{{q}} = \\pm{q_hat:.1f}$ MPa")
-ax.fill_between(diag, diag - q_hat, diag + q_hat, color="#1f77b4", alpha=0.12)
-ax.scatter(mu_te_c[in_band],  y_te_c[in_band],  c="#2ca02c", s=22, alpha=0.85,
-           label=f"covered ({int(in_band.sum())})")
-ax.scatter(mu_te_c[~in_band], y_te_c[~in_band], c="#d62728", s=28, alpha=0.85,
-           label=f"missed ({int((~in_band).sum())})")
-ax.set_xlabel("$\\hat{f}(x_{\\text{test}})$ (MPa)")
-ax.set_ylabel("$y_{\\text{test}}$ (MPa)")
-ax.set_title(f"Split-conformal band, $\\alpha={alpha}$   empirical coverage = {emp_cov_conf:.3f}")
-ax.legend(fontsize=9, loc="lower right")
-plt.tight_layout()
-plt.show()
-
-
-# %% [markdown]
-# **Theory vs measurement.** Split-conformal prediction guarantees
-# *marginal* coverage $\Pr[|y - \hat{f}(x)| \le \hat{q}] \ge 1 - \alpha$
-# in finite samples, distribution-free, provided $(x_i, y_i)$ in
-# calibration and test are **exchangeable** [@angelopoulos_2023_conformal].
-# Our empirical coverage on the fresh test split (printed above) should
-# land near the target $1 - \alpha = 0.9$ — within sampling noise of the
-# guarantee.
-#
-# **What changes if exchangeability fails?** If the test distribution
-# drifts (e.g. you calibrate at T=600 and deploy at T=0), the guarantee
-# evaporates: empirical coverage can collapse far below the nominal level,
-# and you need either a *robust* conformal variant (weighted, adaptive) or
-# a re-calibration step on fresh in-distribution data. (Thursday's Block
-# 4.5 puts numbers on this with CQR + adaptive conformal.)
+# > **Split-conformal primer relocated.** The basic split-conformal recipe
+# > and an empirical coverage check on `TensileTestDataset(T=600)` now live
+# > in the **Week 7 homework** (`week7_uncertainty_and_robustness_homework.py`,
+# > Part E) [@angelopoulos_2023_conformal]. Here in Week 12 we assume you
+# > already know the recipe and exercise the more interesting variant —
+# > **conformalized quantile regression (CQR)** — on materials data in
+# > Thursday's Block 4.5.
 
 
 # %% [markdown]

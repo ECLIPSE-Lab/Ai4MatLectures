@@ -240,7 +240,7 @@ else:
 #
 # `umap-learn` is not in the default course env. Install it with
 # `pip install umap-learn` (wrapped in try/except like the TabPFN pattern
-# you saw in Week 7) and re-run this cell. If the import fails the cell
+# you saw in Week 8) and re-run this cell. If the import fails the cell
 # prints an install hint and skips — your hand-in is then just the t-SNE
 # half plus a note that you did not get UMAP running.
 #

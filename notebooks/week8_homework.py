@@ -1,53 +1,45 @@
 # %% [markdown]
 # # Week 8 — Homework (do BEFORE the Thursday exercise)
 #
-# This week braids three lectures' Week 8 content onto a single dataset:
-#
-# 1. **MFML Unit 8** — Probabilistic view of learning. Aleatoric vs
-#    epistemic uncertainty; Gaussian noise; MLE = MSE; MAP = regularised
-#    MLE; Bayes for predictive distributions; calibration.
-# 2. **MG Week 8** — Regression and generalisation in materials data.
-#    Bias-variance trade-off, dataset-size vs model complexity, why split
-#    design matters more than a small accuracy gain.
-# 3. **ML-PC Unit 8** — Generalisation, robustness, and process windows.
-#    Out-of-condition generalisation; sensitivity to noise and parameter
-#    drift; the *process window* as a region of input space where the
-#    model can still be trusted.
-#
-# **Red thread.** *Fitting a regression model is making a probabilistic
-# claim: "given $\mathbf{x}$, my best guess is $\hat{y}$ with spread
-# $\hat{\sigma}$." Today's homework does the algebra that links MSE to a
-# Gaussian likelihood, sweeps complexity to see the bias-variance U-curve
-# on real lab data, and quantifies what happens when you forget that test
-# data should come from a different process condition than training data.
-# Thursday will then ask: how much of that spread is irreducible noise vs
-# lack of data, and where in input space is the model still trustworthy?*
+# This notebook is the **mandatory warm-up** for the Week 8 in-class exercise.
+# Working through it puts the bias-variance vocabulary in your hands and
+# gives you a working RF / gradient-boosting baseline on real materials data,
+# so Thursday can spend its 90 minutes on the harder question:
+# **what happens when the test distribution is not the training distribution?**
 #
 # **Time:** ~75 minutes.
 #
+# ## Red thread
+#
+# > Real materials models break when the distribution shifts — across
+# > temperatures, prototypes, or microstructure families. This week we make
+# > that breakdown visible, decompose it into bias and variance, and learn
+# > why **tree ensembles + grouped CV** are the practical defense for
+# > tabular materials data.
+#
 # ## What this homework is
 #
-# Four short workouts on the same dataset (`TensileTestDataset` — strain →
-# stress at three process temperatures), each anchored on one core idea:
+# Four short workouts, all anchored on a single tabular-regression target —
+# stress as a function of strain — so the in-class notebook can extend the
+# *same* setup to multiple process temperatures without reintroducing data.
 #
 # | Part | Min | Topic | Lecture anchor |
 # |---|---:|---|---|
-# | A | 20 | MLE for a Gaussian regression: log-likelihood ⇔ MSE; recover $\hat{\sigma}^2$ from residuals | MFML §"Likelihood and MLE" |
-# | B | 20 | Bias-variance U-curve: polynomial degree sweep with and without ridge | MG §"Dataset size vs model complexity" + MFML §"Bias-variance" |
-# | C | 25 | Process-condition split: random vs leave-T-out on the 3-temperature dataset; quantify the leakage gap | ML-PC §"Generalisation to factory-floor data" + MG §"Why split design matters" |
-# | D | 10 | Reflection: when does Part B's U-curve agree with Part C's leakage gap, and when do they disagree? | bridge to Thursday |
+# | A | 20 | Bias-variance decomposition on a 1-D toy (degree 1, 3, 9 polynomials) | MFML §"Bias-variance decomposition" |
+# | B | 20 | K-fold CV on `TensileTestDataset(temperature=0)`: K=5 / 10 / LOOCV | MFML §"Validation"; ML-PC §"Generalization in process data" |
+# | C | 25 | Random forest + gradient boosting; sweep `n_estimators` and `max_depth` | MFML §"Tree ensembles" |
+# | D | 10 | Reflection: why ensembles win on small tabular materials data | bridge to Thursday Block 5 |
 #
 # ## What you must hand in (or be able to show on Thursday)
 #
-# 1. **Part A:** residual histogram + a printed line showing
-#    $\hat{\sigma}^2 \approx \mathrm{MSE}_{\text{train}}$ to 3 decimal
-#    places.
-# 2. **Part B:** train vs test RMSE plotted against polynomial degree for
-#    OLS *and* for ridge ($\alpha = 1.0$). Show the U.
-# 3. **Part C:** a small table of test RMSE under (i) random 80/20 split
-#    over all three temperatures, (ii) leave-$T=600$-out, (iii)
-#    leave-$T=0$-out. Comment on why (i) is misleading.
-# 4. **Part D:** your reflection paragraph (4–6 sentences).
+# 1. Part A: bias-variance decomposition figure with three subplots
+#    (degree 1, 3, 9), each overlaying the bias², variance, noise, and
+#    total-MSE curves as a function of the test-point location $x^\ast$.
+# 2. Part B: a single plot showing the *standard deviation* of the
+#    K-fold-CV MSE across $\geq 10$ random shuffles, as a function of K.
+# 3. Part C: a two-panel figure (RF | XGBoost) of test MSE versus
+#    `n_estimators` (log-x), with one curve per `max_depth`.
+# 4. Part D: your written reflection paragraph (Markdown cell).
 
 # %%
 # Standard imports for the whole homework. Same idiom as weeks 2-6.
@@ -55,9 +47,10 @@ import numpy as np
 import torch
 import matplotlib.pyplot as plt
 
-from sklearn.linear_model import LinearRegression, Ridge
+from sklearn.model_selection import KFold, LeaveOneOut
+from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_squared_error
-from sklearn.preprocessing import StandardScaler
+from xgboost import XGBRegressor
 
 from ai4mat.datasets import TensileTestDataset
 
@@ -66,312 +59,515 @@ torch.manual_seed(0)
 
 
 # %% [markdown]
-# ## Helper: load one temperature as numpy arrays
+# # Part A — Bias-variance decomposition on a 1-D toy
 #
-# `TensileTestDataset` returns torch tensors; for the linear-algebra parts
-# of this homework, plain numpy is easier to read and debug. We keep the
-# helper here because every Part needs it.
+# We make the textbook decomposition concrete by *measuring* its three terms
+# from data instead of taking them on faith. The recipe (MFML §"Bias-variance
+# decomposition") is:
+#
+# - Generating process: $y = f(x) + \varepsilon$ with $f(x) = \sin(2\pi x)$
+#   and $\varepsilon \sim \mathcal{N}(0, \sigma^2)$.
+# - Repeat $R$ times: draw a fresh training set of $n$ noisy samples, fit a
+#   polynomial of degree $d$, evaluate the prediction $\hat f^{(r)}(x^\ast)$
+#   on a fixed grid of test points $x^\ast$.
+# - At every $x^\ast$:
+#   $$\text{bias}^2(x^\ast) = \big(\,\overline{\hat f}(x^\ast) - f(x^\ast)\big)^2,\quad
+#     \text{var}(x^\ast) = \tfrac{1}{R}\sum_r \big(\hat f^{(r)}(x^\ast) - \overline{\hat f}(x^\ast)\big)^2,\quad
+#     \text{noise} = \sigma^2.$$
+# - Total expected MSE at $x^\ast$ = bias² + variance + noise (this identity
+#   is what we will verify visually).
+#
+# Degrees 1, 3, 9 are chosen to span underfit / well-matched / overfit on
+# the same target.
 
 # %%
-def load_tensile_np(temperature: int):
-    """Return (strain, stress) as 1-D numpy arrays at the given temperature."""
-    ds = TensileTestDataset(temperature=temperature)
-    X = ds.X.numpy().reshape(-1)   # (350,)  strain
-    y = ds.y.numpy().reshape(-1)   # (350,)  stress
-    return X, y
+# Ground truth and noise model.
+def f_true(x):
+    return np.sin(2.0 * np.pi * x)
 
 
-# %% [markdown]
-# # Part A — MLE for a Gaussian regression
-#
-# We model the stress at strain $\varepsilon$ as
-# $$ y \mid \varepsilon \sim \mathcal{N}(f_\theta(\varepsilon),\ \sigma^2), $$
-# where $f_\theta$ is whatever function class we are fitting (today: a
-# polynomial in $\varepsilon$). Maximising the log-likelihood over $\theta$
-# gives
-# $$
-# \log p(y \mid \varepsilon, \theta, \sigma)
-# = -\frac{1}{2\sigma^2}\sum_i (y_i - f_\theta(\varepsilon_i))^2 + \text{const}.
-# $$
-# **The first term is $-\frac{1}{2\sigma^2} \cdot N \cdot \mathrm{MSE}$.**
-# Maximising it over $\theta$ is *exactly* minimising the MSE. That is why
-# every regression in this course can be read either as least squares or
-# as Gaussian MLE — the two procedures find the same optimum.
-#
-# The MLE for the noise variance $\sigma^2$, computed *after* the
-# coefficient MLE, is
-# $$ \hat{\sigma}^2 = \frac{1}{N}\sum_i (y_i - f_{\hat\theta}(\varepsilon_i))^2 = \mathrm{MSE}_\text{train}. $$
-#
-# **Your task.** Fit a degree-3 polynomial in strain to the $T=600\,°\mathrm{C}$
-# tensile curve, compute the MLE residual variance, and verify that it
-# equals the training MSE.
+sigma_noise = 0.30
+n_train = 25                # training-set size per resample
+R = 50                       # number of resampled training sets per degree
+x_grid = np.linspace(0.0, 1.0, 200)
+y_grid = f_true(x_grid)
 
-# %%
-strain, stress = load_tensile_np(temperature=600)
 
-# Build the polynomial design matrix Phi: columns are 1, eps, eps^2, eps^3.
-def poly_features(x: np.ndarray, degree: int) -> np.ndarray:
-    """Return the (N, degree+1) Vandermonde matrix [1, x, x^2, ..., x^d]."""
-    return np.vander(x, degree + 1, increasing=True)
-
-Phi = poly_features(strain, degree=3)
-ols = LinearRegression(fit_intercept=False).fit(Phi, stress)
-y_hat = ols.predict(Phi)
-
-residuals = stress - y_hat
-sigma2_mle = np.mean(residuals ** 2)
-mse_train = mean_squared_error(stress, y_hat)
-
-print(f"Part A:")
-print(f"  Number of samples N = {len(strain)}")
-print(f"  Fitted polynomial coefficients (degree 0..3): {ols.coef_}")
-print(f"  MLE residual variance sigma_hat^2 = {sigma2_mle:.4f}")
-print(f"  Training MSE                       = {mse_train:.4f}")
-print(f"  Difference (should be ~ 0)         = {abs(sigma2_mle - mse_train):.2e}")
+def fit_poly_predict(deg, R, n_train, sigma, rng):
+    """Return (R, len(x_grid)) array of predictions on the test grid."""
+    preds = np.zeros((R, len(x_grid)))
+    for r in range(R):
+        x_tr = rng.uniform(0.0, 1.0, size=n_train)
+        y_tr = f_true(x_tr) + rng.normal(scale=sigma, size=n_train)
+        # np.polyfit works in monomial basis. degree 9 on n=25 noisy points
+        # is an explicit overfit regime -- conditioning is fine for the demo.
+        coefs = np.polyfit(x_tr, y_tr, deg=deg)
+        preds[r] = np.polyval(coefs, x_grid)
+    return preds
 
 
 # %%
-# Diagnostic: residual histogram with a Gaussian overlay at sigma_hat.
-fig, ax = plt.subplots(figsize=(6, 4))
-ax.hist(residuals, bins=30, density=True, alpha=0.6, label="residuals")
-xs = np.linspace(residuals.min(), residuals.max(), 200)
-gauss = (1.0 / np.sqrt(2 * np.pi * sigma2_mle)) * np.exp(-(xs ** 2) / (2 * sigma2_mle))
-ax.plot(xs, gauss, "r-", lw=2, label=fr"$\mathcal{{N}}(0,\hat\sigma^2={sigma2_mle:.2f})$")
-ax.set_xlabel("residual y - y_hat (MPa)")
-ax.set_ylabel("density")
-ax.set_title("Part A — residuals vs MLE Gaussian")
-ax.legend()
-plt.tight_layout()
-plt.show()
-
-
-# %% [markdown]
-# **Part A deliverable:** the residual histogram and the printed
-# `sigma_hat^2 ≈ MSE_train` check. The Gaussian overlay should follow the
-# histogram reasonably closely; any tail asymmetry is a hint that the
-# Gaussian-noise assumption is approximate (later: Student-t robustness).
-
-
-# %% [markdown]
-# # Part B — Bias-variance: polynomial degree sweep
-#
-# The Gaussian likelihood from Part A says nothing about *which* function
-# class to use. Take it too small and you under-fit (high bias); take it
-# too large and you over-fit on the 350 training samples (high variance).
-# The classical visual is the U-curve of test error against complexity.
-#
-# We sweep polynomial degree from 1 to 7 with two configurations:
-# 1. **OLS** — closed-form least squares with no regularisation.
-# 2. **Ridge** ($\alpha = 1.0$) — least squares with a Gaussian prior on
-#    the coefficients (we will derive that this is the same as MAP under
-#    a Gaussian prior in Thursday's Block 3).
-#
-# Standardising the polynomial features matters: $\varepsilon^7$ is many
-# orders of magnitude larger than $\varepsilon$, and ridge would treat the
-# raw columns very unequally.
-
-# %%
-strain_T, stress_T = load_tensile_np(temperature=600)
-
 rng = np.random.default_rng(0)
-n = len(strain_T)
-idx = rng.permutation(n)
-n_train = int(0.8 * n)
-tr, te = idx[:n_train], idx[n_train:]
+degrees = [1, 3, 9]
+preds_per_deg = {d: fit_poly_predict(d, R, n_train, sigma_noise, rng) for d in degrees}
 
-X_tr_raw, y_tr = strain_T[tr], stress_T[tr]
-X_te_raw, y_te = strain_T[te], stress_T[te]
-
-degrees = list(range(1, 8))
-rmse_ols_tr, rmse_ols_te = [], []
-rmse_rdg_tr, rmse_rdg_te = [], []
-
-for d in degrees:
-    Phi_tr = poly_features(X_tr_raw, d)
-    Phi_te = poly_features(X_te_raw, d)
-    # Standardise non-bias columns; leave the constant column at 1.
-    scaler = StandardScaler().fit(Phi_tr[:, 1:])
-    Phi_tr_std = np.hstack([Phi_tr[:, :1], scaler.transform(Phi_tr[:, 1:])])
-    Phi_te_std = np.hstack([Phi_te[:, :1], scaler.transform(Phi_te[:, 1:])])
-
-    # OLS
-    m_ols = LinearRegression(fit_intercept=False).fit(Phi_tr_std, y_tr)
-    rmse_ols_tr.append(np.sqrt(mean_squared_error(y_tr, m_ols.predict(Phi_tr_std))))
-    rmse_ols_te.append(np.sqrt(mean_squared_error(y_te, m_ols.predict(Phi_te_std))))
-
-    # Ridge
-    m_rdg = Ridge(alpha=1.0, fit_intercept=False).fit(Phi_tr_std, y_tr)
-    rmse_rdg_tr.append(np.sqrt(mean_squared_error(y_tr, m_rdg.predict(Phi_tr_std))))
-    rmse_rdg_te.append(np.sqrt(mean_squared_error(y_te, m_rdg.predict(Phi_te_std))))
+# Decompose into bias^2, variance, noise, MSE at every grid point.
+decomp = {}
+for d, P in preds_per_deg.items():
+    mean_pred = P.mean(axis=0)                              # (G,)
+    bias2 = (mean_pred - y_grid) ** 2                       # (G,)
+    var = P.var(axis=0)                                     # (G,)  population var
+    noise = np.full_like(bias2, sigma_noise ** 2)            # (G,)
+    mse_pred = bias2 + var + noise                           # textbook identity
+    # Also compute the *empirical* MSE: average over R training sets, with
+    # a fresh y_test draw at each x_grid point. Should match mse_pred.
+    y_test = y_grid + rng.normal(scale=sigma_noise, size=y_grid.shape)
+    mse_emp = ((P - y_test[None, :]) ** 2).mean(axis=0)
+    decomp[d] = dict(bias2=bias2, var=var, noise=noise,
+                     mse_pred=mse_pred, mse_emp=mse_emp)
+    print(f"deg={d}   <bias^2>={bias2.mean():.3f}   <var>={var.mean():.3f}   "
+          f"<noise>={noise.mean():.3f}   <mse>={mse_pred.mean():.3f}")
 
 
 # %%
-fig, axes = plt.subplots(1, 2, figsize=(11, 4.5), sharey=True)
-for ax, tr_curve, te_curve, title in zip(
-    axes,
-    [rmse_ols_tr, rmse_rdg_tr],
-    [rmse_ols_te, rmse_rdg_te],
-    ["OLS (no regularisation)", r"Ridge ($\alpha = 1.0$)"],
-):
-    ax.plot(degrees, tr_curve, "o-", label="train RMSE")
-    ax.plot(degrees, te_curve, "s-", label="test RMSE")
-    ax.set_xlabel("polynomial degree")
-    ax.set_title(title)
-    ax.grid(alpha=0.3)
-    ax.legend()
-axes[0].set_ylabel("RMSE (MPa)")
-fig.suptitle(f"Part B — bias-variance on T={600} °C tensile (N_train={n_train}, N_test={n-n_train})")
+# Three subplots, one per polynomial degree.
+fig, axes = plt.subplots(1, 3, figsize=(15, 4.2), sharey=True)
+for ax, d in zip(axes, degrees):
+    D = decomp[d]
+    ax.plot(x_grid, D["bias2"],     label="bias$^2$",          color="#1f77b4", lw=2)
+    ax.plot(x_grid, D["var"],       label="variance",          color="#d62728", lw=2)
+    ax.plot(x_grid, D["noise"],     label="noise $\\sigma^2$", color="#2ca02c", lw=2, ls="--")
+    ax.plot(x_grid, D["mse_pred"],  label="bias$^2$+var+noise",color="k",       lw=2, alpha=0.6)
+    ax.set_xlabel("$x^\\ast$"); ax.set_title(f"degree $d={d}$")
+    ax.set_ylim(0, 1.5)
+axes[0].set_ylabel("error contribution at $x^\\ast$")
+axes[0].legend(loc="upper center", ncol=2, fontsize=9)
+plt.suptitle("Bias-variance decomposition on $y = \\sin(2\\pi x) + \\varepsilon$, "
+             f"$n_{{\\mathrm{{train}}}}={n_train}$, $R={R}$ resamples")
 plt.tight_layout()
 plt.show()
 
-print(f"\nPart B test RMSE per degree:")
-print(f"{'deg':>4} | {'OLS test':>10} | {'Ridge test':>10}")
-for d, ot, rt in zip(degrees, rmse_ols_te, rmse_rdg_te):
-    print(f"{d:>4} | {ot:>10.3f} | {rt:>10.3f}")
+
+# %% [markdown]
+# **Read these three panels.**
+#
+# - $d=1$: bias² dominates everywhere — a line cannot bend like a sine. Variance
+#   is tiny (the line is rigid).
+# - $d=3$: bias² and variance are both small and roughly balanced. This is
+#   the "right" capacity for the problem.
+# - $d=9$: bias² is essentially zero in the interior of $[0, 1]$, but variance
+#   explodes near the boundaries — every resample bends the high-degree fit
+#   wildly. Total MSE is dominated by variance, not bias.
+#
+# **Take-away.** The textbook identity bias² + variance + noise = expected MSE
+# is not just notation — it is a *measurement procedure*. We will reuse this
+# procedure on a real materials model in Block 3 of Thursday's notebook.
+#
+# **Part A deliverable:** the three-panel figure above.
 
 
 # %% [markdown]
-# **Part B deliverable:** the two-panel figure and the table above.
+# # Part B — How K affects the variance of K-fold CV
 #
-# Things to notice (you will need them on Thursday):
+# Cross-validation is a *random* estimator: shuffle the data, split into K
+# folds, average the per-fold MSE. Two competing concerns:
 #
-# - OLS test error tends to climb steeply at high degrees while train
-#   error keeps dropping — that is the variance side of the U.
-# - Ridge keeps high-degree fits well-behaved; the U flattens. The penalty
-#   acts like a Gaussian prior pulling coefficients toward 0.
-# - At low degrees both curves are close, because regularisation does not
-#   matter when there are no spare parameters to misuse.
-
-
-# %% [markdown]
-# # Part C — Process-condition split: leakage you cannot see in Part B
+# - **Small K** (e.g. K=2) gives folds that are large and very different from
+#   the training set, so each fold's MSE is a high-variance estimate of
+#   generalisation error.
+# - **Large K** (LOOCV) trains on $N-1$ points each time — folds are nearly
+#   identical and the *bias* of the CV estimator drops, but you pay $N$ training
+#   runs and the per-fold MSE has higher variance because each test fold is a
+#   single point.
 #
-# Part B used a random 80/20 split *within one temperature*. Real
-# process-monitoring data comes from runs at different conditions: temperatures,
-# rates, machines, days. If you train on a mix of conditions and evaluate
-# on a mix of conditions, you measure interpolation between conditions
-# you have already seen. You do not measure what happens on a *new*
-# condition you have not.
+# The total CV-MSE estimator's variance across *random shuffles* of the data
+# is what we measure here. For $K \in \{5, 10, N\}$ we run ten shuffles each
+# and plot the standard deviation of the resulting CV-MSE estimate.
 #
-# The tensile dataset has three process conditions: $T \in \{0, 400, 600\}$ °C.
-# Each curve is genuinely different — at $T=0$ the response is brittle and
-# nearly linear, at $T=600$ it is highly nonlinear. We compare three
-# splits:
-#
-# | Split | Train | Test |
-# |---|---|---|
-# | (i) random 80/20 over **all three** temperatures | random 80% | held-out 20% |
-# | (ii) leave-$T=600$-out | T=0 + T=400 | T=600 |
-# | (iii) leave-$T=0$-out | T=400 + T=600 | T=0 |
-#
-# We fit the same model (degree-5 ridge) under each split and compare the
-# test RMSE. The gap between (i) and (ii)/(iii) is the **leakage gap**.
+# *(see MFML §"Validation"; ML-PC §"Generalization in process data")*
 
 # %%
-data_by_T = {T: load_tensile_np(T) for T in [0, 400, 600]}
+ds_T0 = TensileTestDataset(temperature=0)
+X_T0 = ds_T0.X.numpy()                   # (350, 1)  strain
+y_T0 = ds_T0.y.numpy()                   # (350,)    stress
+print(f"TensileTestDataset(T=0): N={len(ds_T0)}   X shape={X_T0.shape}   y range=[{y_T0.min():.1f}, {y_T0.max():.1f}] MPa")
 
-def fit_eval(strain_tr, stress_tr, strain_te, stress_te, degree=5, alpha=1.0):
-    """Standardise polynomial features on train, fit Ridge, return test RMSE."""
-    Phi_tr = poly_features(strain_tr, degree)
-    Phi_te = poly_features(strain_te, degree)
-    scaler = StandardScaler().fit(Phi_tr[:, 1:])
-    Phi_tr_s = np.hstack([Phi_tr[:, :1], scaler.transform(Phi_tr[:, 1:])])
-    Phi_te_s = np.hstack([Phi_te[:, :1], scaler.transform(Phi_te[:, 1:])])
-    m = Ridge(alpha=alpha, fit_intercept=False).fit(Phi_tr_s, stress_tr)
-    return np.sqrt(mean_squared_error(stress_te, m.predict(Phi_te_s))), m, scaler
 
-# (i) random over all three
-all_strain = np.concatenate([data_by_T[T][0] for T in [0, 400, 600]])
-all_stress = np.concatenate([data_by_T[T][1] for T in [0, 400, 600]])
+# %%
+# For each shuffle: shuffle once, then run K-fold and aggregate per-fold MSEs.
+def cv_mse_one_shuffle(X, y, K, model_factory, seed):
+    """Return the average MSE across the K folds for one shuffle.
 
+    `model_factory` returns a fresh estimator each call; we use a small RF
+    so the CV-variance estimate isn't dominated by linear-model rigidity.
+    """
+    rng_local = np.random.default_rng(seed)
+    perm = rng_local.permutation(len(X))
+    Xs, ys = X[perm], y[perm]
+    if K >= len(X):
+        splitter = LeaveOneOut()
+    else:
+        splitter = KFold(n_splits=K, shuffle=False)
+    fold_mses = []
+    for tr, te in splitter.split(Xs):
+        m = model_factory()
+        m.fit(Xs[tr], ys[tr])
+        fold_mses.append(mean_squared_error(ys[te], m.predict(Xs[te])))
+    return float(np.mean(fold_mses))
+
+
+def make_rf():
+    return RandomForestRegressor(n_estimators=50, max_depth=4,
+                                 random_state=0, n_jobs=1)
+
+
+# Three settings: K=5, K=10, LOOCV (=N).
+K_settings = [5, 10, len(X_T0)]
+n_shuffles = 10
+cv_mse_runs = {K: [] for K in K_settings}
+for K in K_settings:
+    for s in range(n_shuffles):
+        cv_mse_runs[K].append(
+            cv_mse_one_shuffle(X_T0, y_T0, K, make_rf, seed=s)
+        )
+    arr = np.array(cv_mse_runs[K])
+    print(f"K={K:>3d}   shuffle-mean MSE = {arr.mean():.2f}   "
+          f"shuffle-std MSE = {arr.std():.3f}   ({n_shuffles} shuffles)")
+
+
+# %%
+# Plot: variability (std across shuffles) of the CV-MSE estimate as a function
+# of K. We expect: K=5 noisy, K=10 less noisy, LOOCV near-deterministic
+# (because the only randomness left is the RF's bootstrap, since LOOCV has no
+# permutation degree of freedom for the splits).
+fig, axes = plt.subplots(1, 2, figsize=(12, 4.2))
+
+# Left: per-shuffle CV-MSE values (jitter scatter), one column per K.
+for i, K in enumerate(K_settings):
+    label = f"K={K}" if K < len(X_T0) else f"LOOCV (K=N={K})"
+    axes[0].scatter([i] * n_shuffles, cv_mse_runs[K], s=30, alpha=0.7, label=label)
+axes[0].set_xticks(range(len(K_settings)))
+axes[0].set_xticklabels([f"K={K}" if K < len(X_T0) else "LOOCV" for K in K_settings])
+axes[0].set_ylabel("CV-MSE estimate (one dot = one shuffle)")
+axes[0].set_title(f"K-fold CV-MSE across {n_shuffles} random shuffles")
+
+# Right: the diagnostic the homework asks for -- std of CV-MSE vs K.
+stds = [np.std(cv_mse_runs[K]) for K in K_settings]
+axes[1].plot([min(K_settings), 10, max(K_settings)], stds, "o-", lw=2, color="#d62728")
+axes[1].set_xscale("log")
+axes[1].set_xlabel("K (log scale)")
+axes[1].set_ylabel("std of CV-MSE across shuffles")
+axes[1].set_title("How much does the CV-MSE estimate jitter with K?")
+plt.tight_layout()
+plt.show()
+
+
+# %% [markdown]
+# **Read this plot.** The right-hand panel is the actionable one: as K grows,
+# the standard deviation of the CV-MSE *across data shuffles* decreases. K=5
+# gives the noisiest estimate; LOOCV gives the smallest spread (in this
+# experiment effectively zero, because LOOCV has no permutation freedom in
+# the splits — only the RF's bootstrap remains as a source of randomness).
+#
+# **But.** LOOCV trained 350 RFs against K=10's 10 RFs. K=10 is the standard
+# practical compromise: most of the variance reduction at a tenth of the cost.
+#
+# **Part B deliverable:** the right-hand panel.
+
+
+# %% [markdown]
+# # Part C — Random forest and gradient boosting
+#
+# Two families of tree ensemble, two different mechanisms:
+#
+# - **Random forest** (Breiman, 2001) builds independent trees on bootstrapped
+#   data + random feature subsets, then averages. Each tree is grown deep and
+#   *high-variance*; the average reduces variance without reducing bias.
+#   Adding trees only helps and eventually plateaus.
+# - **Gradient boosting** (Friedman, 2001; the engine behind XGBoost) builds
+#   trees *sequentially*, each one fitted to the residual of the running
+#   ensemble. Each tree is shallow and *high-bias*; the boosting cascade
+#   reduces bias by accumulating corrections, but eventually starts overfitting
+#   the noise — adding more trees can hurt.
+#
+# We sweep `n_estimators ∈ {1, 5, 10, 50, 100, 500}` and `max_depth ∈ {2, 4, 8}`,
+# train on a held-out 80% of the T=0 stress-strain data, and evaluate test MSE
+# on the remaining 20%. We expect to see RF curves *plateau* and XGBoost
+# curves *dip then rise* (or at least flatten less benignly).
+#
+# *(see MFML §"Tree ensembles")*
+
+# %%
+# Single 80/20 split for the sweep. We could repeat over splits, but Part B
+# already exercised that intuition; here we want clean plots, not error bars.
 rng = np.random.default_rng(1)
-N = len(all_strain)
-idx = rng.permutation(N)
-tr_i, te_i = idx[: int(0.8 * N)], idx[int(0.8 * N) :]
-rmse_random, _, _ = fit_eval(all_strain[tr_i], all_stress[tr_i],
-                             all_strain[te_i], all_stress[te_i])
+perm = rng.permutation(len(X_T0))
+n_tr = int(0.8 * len(X_T0))
+tr_idx, te_idx = perm[:n_tr], perm[n_tr:]
+X_tr, y_tr = X_T0[tr_idx], y_T0[tr_idx]
+X_te, y_te = X_T0[te_idx], y_T0[te_idx]
+print(f"split: train={len(X_tr)}   test={len(X_te)}")
 
-# (ii) leave-T=600-out
-tr_strain = np.concatenate([data_by_T[T][0] for T in [0, 400]])
-tr_stress = np.concatenate([data_by_T[T][1] for T in [0, 400]])
-te_strain, te_stress = data_by_T[600]
-rmse_loo600, _, _ = fit_eval(tr_strain, tr_stress, te_strain, te_stress)
+n_estimators_grid = [1, 5, 10, 50, 100, 500]
+max_depth_grid = [2, 4, 8]
 
-# (iii) leave-T=0-out
-tr_strain = np.concatenate([data_by_T[T][0] for T in [400, 600]])
-tr_stress = np.concatenate([data_by_T[T][1] for T in [400, 600]])
-te_strain, te_stress = data_by_T[0]
-rmse_loo000, _, _ = fit_eval(tr_strain, tr_stress, te_strain, te_stress)
+results_rf = {d: [] for d in max_depth_grid}
+results_xgb = {d: [] for d in max_depth_grid}
 
-print("Part C — test RMSE under three split protocols (degree-5 ridge):")
-print(f"  (i)   random 80/20 over T in {{0, 400, 600}}:  RMSE = {rmse_random:7.2f} MPa")
-print(f"  (ii)  leave-T=600-out (train 0+400, test 600): RMSE = {rmse_loo600:7.2f} MPa")
-print(f"  (iii) leave-T=0-out   (train 400+600, test 0): RMSE = {rmse_loo000:7.2f} MPa")
-print()
-print(f"  Leakage gap (ii)/(i) = {rmse_loo600 / rmse_random:.1f}x")
-print(f"  Leakage gap (iii)/(i) = {rmse_loo000 / rmse_random:.1f}x")
+for d in max_depth_grid:
+    for n in n_estimators_grid:
+        rf = RandomForestRegressor(n_estimators=n, max_depth=d,
+                                   random_state=0, n_jobs=1).fit(X_tr, y_tr)
+        results_rf[d].append(mean_squared_error(y_te, rf.predict(X_te)))
+
+        # tree_method="hist" -> the modern, fast histogram-based booster.
+        xgb = XGBRegressor(n_estimators=n, max_depth=d, learning_rate=0.1,
+                           tree_method="hist", random_state=0, verbosity=0).fit(X_tr, y_tr)
+        results_xgb[d].append(mean_squared_error(y_te, xgb.predict(X_te)))
+    print(f"max_depth={d}   RF MSEs   = {[f'{m:.1f}' for m in results_rf[d]]}")
+    print(f"max_depth={d}   XGB MSEs  = {[f'{m:.1f}' for m in results_xgb[d]]}")
 
 
 # %%
-# Visualise why the leakage exists: the three curves are different shapes.
-fig, ax = plt.subplots(figsize=(7, 5))
-for T in [0, 400, 600]:
-    s, st = data_by_T[T]
-    order = np.argsort(s)
-    ax.plot(s[order], st[order], "o-", ms=3, alpha=0.7, label=fr"$T = {T}$ °C")
-ax.set_xlabel("strain")
-ax.set_ylabel("stress (MPa)")
-ax.set_title("Three process conditions in the tensile dataset")
-ax.legend(); ax.grid(alpha=0.3)
-plt.tight_layout(); plt.show()
+fig, axes = plt.subplots(1, 2, figsize=(13, 4.5), sharey=True)
+colors = {2: "#1f77b4", 4: "#d62728", 8: "#2ca02c"}
+
+for d in max_depth_grid:
+    axes[0].plot(n_estimators_grid, results_rf[d], "o-", lw=2,
+                 color=colors[d], label=f"max_depth={d}")
+    axes[1].plot(n_estimators_grid, results_xgb[d], "o-", lw=2,
+                 color=colors[d], label=f"max_depth={d}")
+
+for ax, title in zip(axes, ["Random Forest", "Gradient Boosting (XGBoost, lr=0.1)"]):
+    ax.set_xscale("log")
+    ax.set_xlabel("n_estimators (log scale)")
+    ax.set_title(title)
+    ax.grid(True, which="both", alpha=0.3)
+    ax.legend()
+axes[0].set_ylabel("test MSE")
+plt.suptitle("Test MSE on TensileTestDataset(T=0) vs n_estimators")
+plt.tight_layout()
+plt.show()
 
 
 # %% [markdown]
-# **Part C deliverable:** the printed table and the three-curve plot.
+# **Read these two panels side-by-side.**
 #
-# Things to notice:
+# - **Random forest.** Test MSE drops sharply between `n_estimators=1` and
+#   $\sim 50$, then flattens. Beyond 100 trees there is essentially no
+#   improvement — that is the variance-reduction mechanism of bagging
+#   converging. `max_depth=8` is the best-performing depth here because the
+#   per-tree variance is well controlled by averaging.
+# - **Gradient boosting.** Test MSE drops more gradually, can keep improving
+#   well past 100 boosted trees, and at large depth ($d=8$) eventually
+#   *increases* again as the ensemble starts memorising training residuals.
+#   That is the "bias reduction first, then variance grows" pattern of
+#   boosting in action.
 #
-# - Split (i) lets stress observations at $T=600$ leak into training,
-#   because the model memorises the $T=600$ shape from points adjacent to
-#   the held-out 20% of $T=600$ samples. Test RMSE looks great.
-# - Split (ii) and (iii) measure the *real* generalisation question: can
-#   the model handle a process condition it has not seen at all? The RMSE
-#   typically blows up by a factor of 5-50x.
-# - This is the same lesson Week 3 taught for sample-vs-specimen splits,
-#   now in the engineering-process flavour ML-PC emphasises.
+# **Take-away.** Random forest's principal mechanism is variance reduction
+# ("average many independent overfit trees"); gradient boosting's is bias
+# reduction ("each tree corrects the previous error"). They land in the same
+# performance neighbourhood for this problem but they get there by *opposite*
+# mathematical routes — and they fail in opposite ways too (RF underfits if
+# trees are too shallow; XGBoost overfits if you boost for too long).
+#
+# **Part C deliverable:** the two-panel figure above.
 
 
 # %% [markdown]
-# # Part D — Reflection: when does the U-curve track the leakage gap?
+# # Part D — Reflection: why ensembles win on small tabular materials data
 #
-# In Part B you saw a bias-variance U inside one process condition. In
-# Part C you saw a leakage gap *across* process conditions. The two
-# diagnostics measure different things, and they can disagree:
+# A persistent empirical observation across materials informatics
+# benchmarks (Matminer, MatBench, NOMAD challenges, your own group's
+# tensile / nanoindentation / SOAP datasets) is that:
 #
-# - A model can sit perfectly at the bottom of its in-condition U (Part B
-#   says "this is the right complexity!") and still fail catastrophically
-#   under leave-condition-out (Part C says "this model has no idea about
-#   $T=0$").
-# - Conversely, a heavily under-fit model can have a small leakage gap
-#   (because it predicts roughly the same wrong thing in every condition)
-#   while still being useless.
+# - On **small** ($N \lesssim 10^4$), **tabular** datasets, gradient-boosted
+#   trees (XGBoost, LightGBM, CatBoost) usually beat both linear models and
+#   small neural networks — often by a large margin.
+# - On **image** or **graph** data, the ranking flips: a small ConvNet or a
+#   message-passing GNN beats any tree ensemble you can throw at it.
 #
-# **Your task (~10 min, write 4-6 sentences):**
+# **Your task (~10 min, write 5–8 sentences):** answer the two questions
+# below in the markdown cell at the bottom.
 #
-# Pick a single materials-science scenario you have worked on or know
-# well — a microscopy classifier, a property predictor, a process monitor,
-# whatever you like — and answer two questions:
+# 1. Why does a tree ensemble usually beat a linear regressor or a small
+#    MLP on small tabular materials data? Identify *at least two*
+#    mechanisms (think about (a) feature interactions, (b) variable scales,
+#    (c) inductive bias for piecewise-constant functions, (d) hyperparameter
+#    robustness).
+# 2. What changes if features become images? Why does the empirical ranking
+#    flip, and what is the inductive bias the ConvNet has that the tree
+#    ensemble lacks?
 #
-# 1. What is the analogue of "process condition" in your scenario? (e.g.
-#    sample, specimen, day, instrument, alloy family, temperature, dose…)
-# 2. If you only had time to run *one* validation experiment before
-#    deploying the model, would you run a Part-B-style bias-variance sweep
-#    or a Part-C-style group-out test, and why?
-#
-# Bring this paragraph to Thursday; we will pick two volunteers to read
-# theirs aloud at the start of Block 1.
+# *Bring this paragraph to Thursday; we will pick two volunteers to read
+# theirs aloud at the start of Block 1, and Block 5 will revisit your
+# answer with measurements.*
 #
 # **Hand in:** your written paragraph (Markdown cell below).
 
 # %% [markdown]
-# > *(your reflection paragraph here)*
+# > # Your answer:
+# >
+# > *(replace this text with your paragraph)*
+
+
+# %% [markdown]
+# # Part E — In-Context Tabular Prediction with TabPFN (optional, ~30 min)
+#
+# *MFML W8 fragment: "Watch for: **TabPFN**".*
+#
+# TabPFN [@hollmann_2025_tabpfn] is a 2025 Nature result: a transformer
+# *pre-trained* on millions of synthetic tabular tasks that performs
+# **zero-shot in-context** prediction on a new dataset. You hand it
+# `(X_train, y_train, X_test)` and it returns predictions in one forward
+# pass — no per-task gradient descent, no hyperparameter tuning. The claim
+# is that, on the small-tabular regime ($N \lesssim 10^4$, $D \lesssim 500$),
+# it matches or beats a carefully tuned gradient-boosted tree.
+#
+# We test that claim here on the *same* T=0 stress-strain split we used in
+# Part C, against `XGBRegressor` with sensible defaults. ML-PC Week 12 will
+# deploy the same model on a materials-descriptor benchmark.
+#
+# > **Heavy dependency.** This cell needs `pip install tabpfn`. The first
+# > call downloads a checkpoint of roughly **1 GB**. Skip Part E entirely
+# > if you do not want that on your disk — the rest of the notebook does
+# > not depend on it.
+
+# %%
+# requires: pip install tabpfn
+# (∼1 GB checkpoint download on first run; cached afterwards)
+import time
+
+import xgboost as xgb
+
+try:
+    from tabpfn import TabPFNRegressor
+    _TABPFN_OK = True
+except ImportError as e:
+    print(f"[Part E skipped] TabPFN not installed: {e}")
+    print("    Install with:  pip install tabpfn")
+    _TABPFN_OK = False
+
+# Reuse the *exact same* 80/20 split from Part C — TensileTestDataset(T=0),
+# 350 rows × 1 feature. Well inside TabPFN v2's sweet spot of
+# N ≤ 10 000 rows and D ≤ 500 features (here capped at N ≤ 1000, D ≤ 100
+# per the assignment instructions — already satisfied).
+assert len(X_tr) <= 1000 and X_tr.shape[1] <= 100, \
+    "Part E assumes the small-tabular regime; widen the cap if you change datasets."
+print(f"Reusing Part C split: N_train={len(X_tr)}   N_test={len(X_te)}   D={X_tr.shape[1]}")
+
+
+def bootstrap_rmse_ci(y_true, y_pred, n_boot=10, seed=0):
+    """Return (rmse, lo95, hi95) from a small (n=10) bootstrap on the residuals.
+
+    Ten resamples is a coarse interval — fine for a 30-min hands-on, not a
+    publication. Increase n_boot if you want a tighter CI.
+    """
+    rng_b = np.random.default_rng(seed)
+    rmses = []
+    N = len(y_true)
+    for _ in range(n_boot):
+        idx = rng_b.integers(0, N, size=N)
+        rmses.append(np.sqrt(mean_squared_error(y_true[idx], y_pred[idx])))
+    rmses = np.asarray(rmses)
+    return float(rmses.mean()), float(np.percentile(rmses, 2.5)), float(np.percentile(rmses, 97.5))
+
+
+# --- Baseline: XGBoost with sensible defaults (no tuning) -------------------
+xgb_model = xgb.XGBRegressor(n_estimators=200, max_depth=4, learning_rate=0.1,
+                             tree_method="hist", random_state=0, verbosity=0)
+t0 = time.perf_counter()
+xgb_model.fit(X_tr, y_tr)
+xgb_pred = xgb_model.predict(X_te)
+xgb_time = time.perf_counter() - t0
+xgb_rmse, xgb_lo, xgb_hi = bootstrap_rmse_ci(y_te, xgb_pred, n_boot=10, seed=0)
+
+# --- TabPFN: zero-shot, no tuning ------------------------------------------
+if _TABPFN_OK:
+    # Use the 1080Ti if available; TabPFN v2 falls back to CPU automatically.
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    tabpfn_model = TabPFNRegressor(device=device)
+    t0 = time.perf_counter()
+    tabpfn_model.fit(X_tr, y_tr)
+    tabpfn_pred = tabpfn_model.predict(X_te)
+    tabpfn_time = time.perf_counter() - t0
+    tabpfn_rmse, tabpfn_lo, tabpfn_hi = bootstrap_rmse_ci(
+        y_te, tabpfn_pred, n_boot=10, seed=0
+    )
+else:
+    tabpfn_rmse = tabpfn_lo = tabpfn_hi = tabpfn_time = float("nan")
+    device = "n/a"
+
+
+# %%
+# Three-column comparison table: model | test metric | inference time (s).
+print()
+print(f"Device: {device}")
+print(f"{'model':<10} | {'test RMSE [MPa] (95% CI, 10-boot)':<38} | {'fit+predict time [s]':>22}")
+print("-" * 78)
+print(f"{'XGBoost':<10} | {xgb_rmse:6.2f}  ({xgb_lo:6.2f}, {xgb_hi:6.2f})              | "
+      f"{xgb_time:22.3f}")
+if _TABPFN_OK:
+    print(f"{'TabPFN':<10} | {tabpfn_rmse:6.2f}  ({tabpfn_lo:6.2f}, {tabpfn_hi:6.2f})              | "
+          f"{tabpfn_time:22.3f}")
+else:
+    print(f"{'TabPFN':<10} | (skipped — install tabpfn to run)        | {'n/a':>22}")
+
+
+# %% [markdown]
+# **Read this table.**
+#
+# On this small-tabular regression task — 280 training rows, 1 feature,
+# no tuning on either side — **TabPFN typically matches or beats XGBoost
+# without a single hyperparameter being chosen by you**. That is the
+# headline of [@hollmann_2025_tabpfn]: the inductive bias for "tabular
+# prediction" has been *amortised* into the transformer's weights during
+# pre-training on millions of synthetic tasks, so each new dataset is just
+# in-context inference.
+#
+# **Costs that are not free:**
+#
+# - The model checkpoint is roughly **1 GB** on disk.
+# - **Inference per sample is markedly slower** than a fitted XGBoost
+#   (every prediction is a transformer forward pass over the full training
+#   set as context). For $N_\text{test} \lesssim 10^3$ this is a non-issue;
+#   for streaming or large test sets it matters.
+# - It is **bounded** to the small-tabular regime — quality degrades past
+#   $N \approx 10^4$ rows or $D \approx 500$ features, which is exactly the
+#   ceiling for which it was trained. Outside that box, return to XGBoost
+#   or a graph/CNN model as appropriate.
+#
+# ML-PC Week 12 will repeat this comparison on a materials-descriptor
+# benchmark (SOAP / MBTR features), where the regime is the same shape and
+# the same conclusion has been reported in the literature.
+
+# %% [markdown]
+# > ### Reflection
+# >
+# > In your own words, **why is TabPFN's "in-context" claim plausible?
+# > What would break it?**
+# >
+# > *(replace this text with 3–5 sentences. Consider: what does
+# > pre-training on millions of synthetic tabular tasks actually buy you?
+# > Under what kind of distribution shift would the amortised prior fail?)*
+
+
+# %% [markdown]
+# ## Hand-in checklist
+#
+# Bring (or have on screen) the following on Thursday:
+#
+# 1. The bias-variance decomposition figure from Part A (3 subplots).
+# 2. The CV-MSE-std-vs-K plot from Part B.
+# 3. The RF vs XGBoost MSE-vs-`n_estimators` figure from Part C.
+# 4. Your written reflection paragraph from Part D.
+# 5. *(optional)* The XGBoost-vs-TabPFN comparison table from Part E and
+#    your reflection answer.
+#
+# All four (five) feed directly into Thursday's blocks: Part A scaffolds
+# Block 3 (decomposing the across-temperature error), Part B underlies the
+# evaluation methodology in Blocks 2 and 5, Part C is the foundation for
+# Block 5 (tree ensembles vs MLP across temperatures) and Block 6
+# (XGBoost on SOAP descriptors), Part D is what we will measure against
+# in Block 7 Exercise (i), and Part E previews ML-PC Week 12's TabPFN
+# deployment on materials descriptors.

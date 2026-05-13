@@ -1,14 +1,18 @@
 # %% [markdown]
-# # Week 7 — Generalization and ensembles
+# # Week 8 — Generalization and ensembles
 #
 # This week we braid three lectures:
 #
-# 1. **MFML Unit 7**: Generalization, the bias-variance decomposition,
+# 1. **MFML Unit 8**: Generalization, the bias-variance decomposition,
 #    regularization, and **tree ensembles** (random forests, gradient
 #    boosting). Theory anchor.
-# 2. **ML-PC Unit 7**: Time-series and process monitoring — train at one
-#    process condition, fail at another. Lab-story anchor on
-#    `TensileTestDataset` at $T \in \{0, 400, 600\}\,^\circ$C.
+# 2. **ML-PC Unit 7**: Generalization, robustness, and process windows —
+#    generalization in materials process data, group-CV, and sensitivity
+#    analysis on AM / process data. Lab-story anchor on `TensileTestDataset`
+#    at $T \in \{0, 400, 600\}\,^\circ$C. *(Note: the older "Time-series and
+#    process monitoring" material is now in
+#    `ml_for_characterization_and_processing/unit07_time_series_supplementary/`
+#    — supplementary, not lectured.)*
 # 3. **MG Unit 7**: Local atomic environments and **SOAP descriptors**;
 #    grouped CV by structure family. Structure-property anchor.
 #
@@ -19,7 +23,7 @@
 # tabular materials data.*
 #
 # > **Pre-flight check.** This notebook **assumes** you have run
-# > `notebooks/week7_homework.py`. Block 1 picks up directly from your RF
+# > `notebooks/week8_homework.py`. Block 1 picks up directly from your RF
 # > and XGBoost results in Part C; we will not re-derive them.
 #
 # ## Agenda (90 min)
@@ -765,7 +769,7 @@ plt.show()
 
 
 # %% [markdown]
-# ## Exam-aligned must-know statements (from MFML Unit 7 §"Exam-aligned")
+# ## Exam-aligned must-know statements (from MFML Unit 8 §"Exam-aligned")
 #
 # Re-read these after the exercises; today's blocks have given you the
 # concrete intuition for every one of them.

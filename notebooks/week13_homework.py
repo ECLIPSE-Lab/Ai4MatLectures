@@ -8,7 +8,7 @@
 # 1. **MFML Unit 13** — Physics-informed & constrained learning. PINNs
 #    embed the governing ODE/PDE into the loss; auto-diff makes the
 #    physics term a one-liner.
-# 2. **ML-PC Unit 13** — Physics-informed and constrained ML. Same
+# 2. **ML-PC Unit 12** — Physics-informed and constrained ML. Same
 #    machinery, applied to processing/characterization tasks: penalty
 #    terms turn known constraints (monotonicity, conservation, elastic
 #    boundary conditions) into soft regularisers.

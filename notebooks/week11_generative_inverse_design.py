@@ -9,10 +9,9 @@
 #    DDPM as historical anchor, **flow matching** as the 2026 default
 #    [@lipman_2023_flow_matching], **consistency models** for one-step
 #    sampling [@song_2023_consistency].
-# 2. **ML-PC Unit 11** (delivered title; folder still
-#    `unit09_inverse_problems`): generative inverse design — VAE-based
-#    property targeting, **flow-matching-based** microstructure generation,
-#    failure modes (mode collapse, OOD targets).
+# 2. **ML-PC Unit 11** (`unit08_inverse_problems`): generative inverse
+#    design — VAE-based property targeting, **flow-matching-based**
+#    microstructure generation, failure modes (mode collapse, OOD targets).
 # 3. **MG Unit 10** (delivered as W11): latent spaces of materials —
 #    composition–structure–property maps, **latent-space arithmetic for
 #    property targeting**.
@@ -923,8 +922,9 @@ plt.tight_layout(); plt.show()
 # %% [markdown]
 # ---
 # **Bridge to Week 12.** Next week MFML moves to *uncertainty
-# quantification* (Gaussian processes, ensembles, conformal prediction)
-# and ML-PC pairs that with *uncertainty-aware discovery loops*. The
+# quantification* (Gaussian processes, MC dropout, ensembles; the
+# split-conformal primer was already introduced in MFML Unit 7) and
+# ML-PC pairs that with *uncertainty-aware discovery loops*. The
 # discipline this week — measuring achieved properties, refusing OOD
 # candidates, watching for posterior collapse — is the prerequisite for
 # *honest* discovery.

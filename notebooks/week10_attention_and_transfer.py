@@ -11,9 +11,13 @@
 #    freeze the ViT trained on Ising, transfer its embedding to a
 #    Cahn-Hilliard regression task, and shoot it out against PCA and
 #    raw-pixel features.
-# 3. **ML-PC Unit 10** — ML for characterization signals. We end the
-#    session by running the *same* multi-head attention on tensile
-#    curves treated as 1D sequences — the spectral-compression analogue.
+# 3. **ML-PC parallel-track this week.** Unit 9b (Transformers for
+#    Materials) is a companion deck within W9 and pairs naturally with
+#    this notebook. ML-PC Unit 10 (Automation in microscopy) is the
+#    calendar-W10 lecture but uses different material; this notebook
+#    stays on attention/ViT and ends by running the *same* multi-head
+#    attention on tensile curves treated as 1D sequences — the
+#    spectral-compression analogue.
 #
 # **Red thread.** *Self-attention does not care whether its tokens are
 # image patches, spectral channels, or atoms in a crystal — the same

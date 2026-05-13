@@ -6,7 +6,7 @@
 # 1. **MFML Unit 13** — Physics-informed & constrained learning. We
 #    keep the PINN from the homework, add a Gaussian Process baseline
 #    on the same data, and combine them.
-# 2. **ML-PC Unit 13** — Physics-informed and constrained ML. Penalty
+# 2. **ML-PC Unit 12** — Physics-informed and constrained ML. Penalty
 #    terms turn known constraints (boundary conditions, monotonicity,
 #    elastic limits) into soft regularisers we apply to a real
 #    materials regression: tensile data with the elastic-zero

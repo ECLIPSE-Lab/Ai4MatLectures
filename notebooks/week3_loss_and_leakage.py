@@ -679,8 +679,8 @@ assert max_gap >= 0.10, (
 #   for the leaky direction. The bimodal stress–strain curve (elastic regime
 #   then plateau) means *neither half* of the data extrapolates to the other —
 #   the model needs to see both regimes. Temporal splits that work well live
-#   in week 7's process-monitoring notebook; the lesson here is that even an
-#   "honest" temporal split can have R² well below random K-fold.
+#   in the supplementary ML-PC time-series deck; the lesson here is that even
+#   an "honest" temporal split can have R² well below random K-fold.
 #
 # *Defensive habit:* before reporting a CV score, ask:
 # 1. Did the test fold see any preprocessing statistics from the train fold? *(5a)*
@@ -820,16 +820,18 @@ assert max_gap >= 0.10, (
 # **Forward-pointers (already on the syllabus):**
 #
 # - **MFML Unit 6** — full first-order optimization (momentum, Adam, conditioning).
-# - **MFML Unit 8** — full Bayesian / MAP picture; the loss-as-NLL framing made formal.
+# - **MFML Unit 7** — full Bayesian / MAP picture; the loss-as-NLL framing made formal.
 # - **ML-PC week 5** — image segmentation metrics (Dice, IoU) — the categorical
 #   counterpart to today's MSE/MAE story.
-# - **ML-PC week 7** — process monitoring, where temporal splits are the default.
-# - **MFML Unit 12** — uncertainty (Bayesian regression, Gaussian processes) — replaces
-#   point estimates with posteriors; today's L2-regularisation already secretly
-#   put a Gaussian prior on the weights (MAP interpretation).
+# - **ML-PC Unit 7 supplementary time-series deck** — temporal splits are the
+#   default there.
+# - **MFML Unit 7** — Bayesian regression / conformal prediction; today's
+#   L2-regularisation already secretly put a Gaussian prior on the weights
+#   (MAP interpretation).
+# - **MFML Unit 12** — Gaussian processes, MC dropout, active learning —
+#   posterior-driven uncertainty for materials discovery.
 #
 # **Things we deliberately *did not* cover today** (each has a home elsewhere):
 #
 # - GLM / exponential family / IRLS — see the GLM materials when they appear later.
-# - Differentiation as a transform — comes back in week 7.
 # - Probabilistic labels / inter-annotator variance — comes back in MFML Unit 12.

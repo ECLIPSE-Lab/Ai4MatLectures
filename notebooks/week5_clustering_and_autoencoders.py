@@ -227,7 +227,7 @@ plt.show()
 # GMM with maximally constrained covariances and zero soft-assignment
 # temperature. This is the first clean example in the course of "simple
 # algorithm = limit of richer probabilistic model"; the same pattern returns
-# in MFML Unit 8 (probabilistic view of learning) and Unit 11 (unsupervised
+# in MFML Unit 7 (probabilistic view of learning) and Unit 11 (unsupervised
 # learning, contrastive losses).
 
 
@@ -880,7 +880,8 @@ plt.show()
 # easy regime — the two distributions look obviously different to any
 # human, let alone a CNN. Detecting a *subtle* anomaly *inside* NEU-DET
 # itself (e.g. a never-seen seventh defect class) is much harder, and is
-# the subject of MFML Unit 11 and ML-PC Unit 11 later in the semester.
+# the subject of MFML Unit 11 and ML-PC Unit 10 (Automation in microscopy)
+# later in the semester.
 
 
 # %% [markdown]

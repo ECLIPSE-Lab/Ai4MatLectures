@@ -8,7 +8,7 @@
 #    XAI; six levels of explainability; sensitivity analysis; SHAP and
 #    Integrated Gradients; mechanistic interpretability (sparse
 #    autoencoders); OOD detection; counterfactuals.
-# 2. **ML-PC Unit 14** — Integration, limits, and reflection. Why ML
+# 2. **ML-PC Unit 13** — Integration, limits, and reflection. Why ML
 #    fails in real labs; explainability for experimental ML
 #    (CAMs / SHAP); when ML genuinely changes processing.
 # 3. **MG Unit 14** — Physical constraints, limits, and outlook.

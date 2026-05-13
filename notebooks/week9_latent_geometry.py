@@ -6,10 +6,9 @@
 #
 # 1. **MFML Unit 9**: Latent spaces & advanced representation learning —
 #    PCA, t-SNE, UMAP, contrastive learning, linear probing.
-# 2. **ML-PC Unit 9** (delivered title; folder still
-#    `unit10_characterization_signals`): PCA + AE on spectra,
-#    reconstruction error as anomaly score, t-SNE/UMAP on hyperspectral
-#    embeddings.
+# 2. **ML-PC Unit 9** (`unit09_characterization_signals`): PCA + AE on
+#    spectra, reconstruction error as anomaly score, t-SNE/UMAP on
+#    hyperspectral embeddings.
 # 3. **MG Unit 8** (delivered as W9): NN architectures for materials
 #    (SchNet/CGCNN/MEGNet/M3GNet) — *the trained network is itself an
 #    embedding model*, and its penultimate layer carries chemistry,

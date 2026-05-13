@@ -11,9 +11,11 @@
 #    multi-head, positional encoding, the transformer block, ViT.
 # 2. **MG Week 10** — Representation learning and feature discovery.
 #    Engineered vs learned features; transferability.
-# 3. **ML-PC Unit 10** — ML for characterization signals. Spectral
-#    compression and dimensionality reduction. Same attention machinery
-#    works on 1D sequences of intensities (Thursday Block 7).
+# 3. **ML-PC parallel-track this week.** Unit 9b (Transformers for
+#    Materials) is the natural pair for this homework. ML-PC Unit 10
+#    (Automation in microscopy) is the calendar-W10 lecture but uses
+#    different material; we keep this homework on attention/ViT and apply
+#    the same machinery to 1D sequences of intensities (Thursday Block 7).
 #
 # **Red thread.** *Self-attention does not care whether its tokens are
 # image patches, spectral channels, or atoms in a crystal — the same

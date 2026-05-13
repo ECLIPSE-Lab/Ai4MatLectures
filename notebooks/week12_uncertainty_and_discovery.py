@@ -6,7 +6,7 @@
 # 1. **MFML Unit 12**: Uncertainty in predictions — Gaussian Processes (the
 #    main tool), MC dropout, deep ensembles, mixture-density networks,
 #    calibration, the evidence framework. Theory anchor.
-# 2. **ML-PC Unit 12**: Materials UQ case studies — 21CrMoV5-7 GP for
+# 2. **ML-PC Unit 11**: Materials UQ case studies — 21CrMoV5-7 GP for
 #    hardness, MC-dropout SEM segmentation, additive-manufacturing active
 #    learning. Lab-story anchor.
 # 3. **MG (curriculum) → slides folder 11**: Clustering vs discovery in
@@ -594,7 +594,9 @@ plt.show()
 # (wide in plastic regime, tight in elastic regime), with the same
 # finite-sample coverage guarantee as split conformal.
 #
-# *(see MFML §"Conformal prediction"; ML-PC §"CQR for materials regression")*
+# *(see MFML Unit 7 §"Conformal prediction" for the split-conformal primer;
+# here we apply the recipe — and its CQR extension — to materials data. See
+# also ML-PC §"CQR for materials regression".)*
 
 # %%
 # Re-use the T=600 surrogate from Block 1 (gp_recap) as the mean

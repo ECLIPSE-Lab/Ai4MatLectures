@@ -997,8 +997,9 @@ plt.tight_layout(); plt.show()
 
 # %% [markdown]
 # ---
-# **Bridge to Week 7.** Next week MFML moves to *generalization* (bias-
-# variance, regularisation, model selection) and ML-PC pairs that with
-# *process windows + robustness*.  Week 6's optimizer toolkit + fine-tuning
-# discipline is the prerequisite for that — without honest fine-tuning,
-# you cannot honestly measure generalization.
+# **Bridge to Week 7.** Next week MFML moves to the *probabilistic view of
+# learning* (MLE, MAP, conformal prediction) and ML-PC pairs that with
+# *generalization, robustness, and process windows*.  Week 6's optimizer
+# toolkit + fine-tuning discipline is the prerequisite for both — without
+# honest fine-tuning, you cannot honestly measure either uncertainty or
+# generalization.

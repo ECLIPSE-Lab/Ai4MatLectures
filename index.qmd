@@ -22,8 +22,8 @@ scripts (Jupytext cell markers).
 | 4 | Architecture & representation | [week4_homework.py](notebooks/week4_homework.py) | [week4_architecture_and_representation.py](notebooks/week4_architecture_and_representation.py) |
 | 5 | Clustering & autoencoders | [week5_homework.py](notebooks/week5_homework.py) | [week5_clustering_and_autoencoders.py](notebooks/week5_clustering_and_autoencoders.py) |
 | 6 | Optimization & fine-tuning | [week6_homework.py](notebooks/week6_homework.py) | [week6_optimization_and_finetuning.py](notebooks/week6_optimization_and_finetuning.py) |
-| 7 | Generalization, ensembles & distribution shift | [week7_homework.py](notebooks/week7_homework.py) | [week7_generalization_and_ensembles.py](notebooks/week7_generalization_and_ensembles.py) |
-| 8 | Uncertainty & robustness on tensile data | [week8_homework.py](notebooks/week8_homework.py) | [week8_uncertainty_and_robustness.py](notebooks/week8_uncertainty_and_robustness.py) |
+| 7 | Uncertainty & robustness on tensile data | [week7_uncertainty_and_robustness_homework.py](notebooks/week7_uncertainty_and_robustness_homework.py) | [week7_uncertainty_and_robustness.py](notebooks/week7_uncertainty_and_robustness.py) |
+| 8 | Generalization, ensembles & distribution shift | [week8_homework.py](notebooks/week8_homework.py) | [week8_generalization_and_ensembles.py](notebooks/week8_generalization_and_ensembles.py) |
 | 9 | Latent geometry — PCA, t-SNE, probing, contrastive | [week9_homework.py](notebooks/week9_homework.py) | [week9_latent_geometry.py](notebooks/week9_latent_geometry.py) |
 | 10 | Attention, ViT & cross-system transfer | [week10_homework.py](notebooks/week10_homework.py) | [week10_attention_and_transfer.py](notebooks/week10_attention_and_transfer.py) |
 | 11 | Generative inverse design (VAE, CVAE, DDPM) | [week11_homework.py](notebooks/week11_homework.py) | [week11_generative_inverse_design.py](notebooks/week11_generative_inverse_design.py) |
@@ -37,7 +37,7 @@ scripts (Jupytext cell markers).
 |---|---|---|---|
 | 4 | NN architecture & backprop | Iris / Alpaydin Digits | [week04_classifier_iris](notebooks/MFML/week04_classifier_iris.html), [week05_backprop_digits](notebooks/MFML/week05_backprop_digits.html) |
 | 5 | Clustering & autoencoders | Nanoindentation / Ising full | **braided:** [week5_clustering_and_autoencoders.py](notebooks/week5_clustering_and_autoencoders.py); per-course: [week11_clustering_nanoindentation](notebooks/MFML/week11_clustering_nanoindentation.html), [week10_autoencoder_ising_full](notebooks/MFML/week10_autoencoder_ising_full.html) |
-| 7 | Overfitting, regularization & tree ensembles | Ising light / Tensile / SOAP | **braided:** [week7_generalization_and_ensembles.py](notebooks/week7_generalization_and_ensembles.py); per-course: [week07_overfitting_ising_light](notebooks/MFML/week07_overfitting_ising_light.html) |
+| 8 | Overfitting, regularization & tree ensembles | Ising light / Tensile / SOAP | **braided:** [week8_generalization_and_ensembles.py](notebooks/week8_generalization_and_ensembles.py); per-course: [week07_overfitting_ising_light](notebooks/MFML/week07_overfitting_ising_light.html) |
 | 10 | Latent spaces & embeddings | Ising full | [week10_autoencoder_ising_full](notebooks/MFML/week10_autoencoder_ising_full.html) |
 | 11 | Unsupervised learning (deep dive) | Nanoindentation | [week11_clustering_nanoindentation](notebooks/MFML/week11_clustering_nanoindentation.html) |
 | 12 | Uncertainty in predictions (GPs) | Tensile / 1-D toy | **braided:** [week12_uncertainty_and_discovery.py](notebooks/week12_uncertainty_and_discovery.py) |
@@ -48,7 +48,7 @@ scripts (Jupytext cell markers).
 |---|---|---|---|
 | 4 | Microstructure representations & CNN baseline | Alpaydin Digits / Ising | [week04_baseline_digits](notebooks/MLPC/week04_baseline_digits.html), [week05_cnn_ising_light](notebooks/MLPC/week05_cnn_ising_light.html), [week05_cnn_ising_full](notebooks/MLPC/week05_cnn_ising_full.html) |
 | 5 | Unsupervised learning in materials | Ising / Cahn-Hilliard / NEU-DET / ESTM | **braided:** [week5_clustering_and_autoencoders.py](notebooks/week5_clustering_and_autoencoders.py); per-course: [week05_clustering_estm](notebooks/MLPC/week05_clustering_estm.html), [week05_clustering_neu_det](notebooks/MLPC/week05_clustering_neu_det.html), [week11_anomaly_cahn_hilliard](notebooks/MLPC/week11_anomaly_cahn_hilliard.html) |
-| 7 | Process monitoring & distribution shift | Tensile Test | **braided:** [week7_generalization_and_ensembles.py](notebooks/week7_generalization_and_ensembles.py); per-course: [week07_process_monitoring_tensile](notebooks/MLPC/week07_process_monitoring_tensile.html) |
+| 7 | Generalization, robustness & process windows | Tensile Test | **braided:** [week7_uncertainty_and_robustness.py](notebooks/week7_uncertainty_and_robustness.py) and [week8_generalization_and_ensembles.py](notebooks/week8_generalization_and_ensembles.py); supplementary (process monitoring / time series): [week07_process_monitoring_tensile](notebooks/MLPC/week07_process_monitoring_tensile.html) |
 | 11 | Anomaly detection via AE (automation context) | Cahn-Hilliard | [week11_anomaly_cahn_hilliard](notebooks/MLPC/week11_anomaly_cahn_hilliard.html) |
 | 12 | UQ + Bayesian active learning | Tensile Test | **braided:** [week12_uncertainty_and_discovery.py](notebooks/week12_uncertainty_and_discovery.py) (Blocks 2–4) |
 
@@ -57,7 +57,7 @@ scripts (Jupytext cell markers).
 | Week | Topic | Dataset | Notebook |
 |---|---|---|---|
 | 5 | Descriptors + regression | Chemical Elements | [week05_descriptors_elements](notebooks/MG/week05_descriptors_elements.html) |
-| 7 | Local atomic envs (SOAP) & grouped CV | ASE bulk prototypes (Cu/Fe/Si/NaCl/MgO) | **braided:** [week7_generalization_and_ensembles.py](notebooks/week7_generalization_and_ensembles.py) (Block 6) |
+| 7 | Local atomic envs (SOAP) & grouped CV | ASE bulk prototypes (Cu/Fe/Si/NaCl/MgO) | **braided:** [week8_generalization_and_ensembles.py](notebooks/week8_generalization_and_ensembles.py) (Block 6) |
 | 8 | Regression & generalization | Nanoindentation | [week08_regression_nanoindentation](notebooks/MG/week08_regression_nanoindentation.html) |
 | 11 | Latent space (Ising) | Ising light | [week11_latent_ising](notebooks/MG/week11_latent_ising.html) |
 | 11 | Materials latent space | Cahn-Hilliard | [week11_latent_cahn_hilliard](notebooks/MG/week11_latent_cahn_hilliard.html) |

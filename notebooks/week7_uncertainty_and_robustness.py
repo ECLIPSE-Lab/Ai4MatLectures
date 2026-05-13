@@ -1,9 +1,9 @@
 # %% [markdown]
-# # Week 8 — Uncertainty and robustness on tensile data
+# # Week 7 — Uncertainty and robustness on tensile data
 #
 # This week braids three lectures:
 #
-# 1. **MFML Unit 8** — Probabilistic view of learning. We turn the OLS
+# 1. **MFML Unit 7** — Probabilistic view of learning. We turn the OLS
 #    regression from the homework into an explicit Bayesian model and
 #    decompose the predictive variance into *aleatoric* (irreducible noise)
 #    and *epistemic* (lack of data) parts.
@@ -11,7 +11,7 @@
 #    homework already showed the bias-variance U inside a single process
 #    condition; today we keep the small-data discipline but build models
 #    that *report* their own uncertainty.
-# 3. **ML-PC Unit 8** — Generalisation, robustness, and process windows.
+# 3. **ML-PC Unit 7** — Generalisation, robustness, and process windows.
 #    We end the day by computing input sensitivities and identifying the
 #    region of the input space where the model is still trustworthy.
 #
@@ -25,9 +25,9 @@
 # threshold. Outside that window, you do not get to use this model.*
 #
 # > **Pre-flight check.** This notebook **assumes** you have run
-# > `notebooks/week8_homework.py`. Block 1 picks up directly from your MLE
-# > = MSE result, Part B's polynomial sweep, and Part C's leakage gap; we
-# > will not re-derive them.
+# > `notebooks/week7_uncertainty_and_robustness_homework.py`. Block 1 picks
+# > up directly from your MLE = MSE result, Part B's polynomial sweep, and
+# > Part C's leakage gap; we will not re-derive them.
 #
 # ## Agenda (90 min)
 #

@@ -8,7 +8,7 @@
 #    SHAP, Integrated Gradients, counterfactuals, OOD detection, the
 #    six levels of explainability, and a first look at **mechanistic
 #    interpretability** (superposition, sparse autoencoders).
-# 2. **ML-PC Unit 14** — Integration, limits, reflection. Why ML
+# 2. **ML-PC Unit 13** — Integration, limits, reflection. Why ML
 #    fails in real labs; explainability for experimental ML;
 #    instrument drift and distribution shift in practice.
 # 3. **MG Unit 14** — Physical constraints, limits, outlook.
@@ -17,7 +17,7 @@
 #
 # **Red thread.** *A 95%-accurate model has 5% wrong predictions —
 # the only useful question is **which 5%**. Today we instrument the
-# tensile regression model from Week 8 with SHAP to learn **why**
+# tensile regression model from Week 7 with SHAP to learn **why**
 # each prediction is what it is, train a **sparse autoencoder on the
 # Ising-CNN's hidden activations** to ask **what concepts** the
 # network represents internally (mechanistic interpretability),
