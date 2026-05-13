@@ -711,6 +711,303 @@ plt.show()
 
 
 # %% [markdown]
+# ## Exercise 5 (stretch, optional) — Tiny 1-D FNO and PINO on the damped harmonic oscillator
+#
+# So far every model has fit **one** trajectory: a single initial
+# condition (IC) of the damped oscillator. What if we want a network
+# that maps an *initial condition* to the *entire trajectory* for any
+# IC in some family? That is a **neural operator** — a map from one
+# function space to another.
+#
+# A **Fourier Neural Operator (FNO)** [@li_2024_pino] does this by
+# parameterising a linear layer in the frequency domain: take an FFT,
+# truncate to the first $k$ modes, multiply by a learned complex
+# matrix, inverse-FFT, add a pointwise residual, repeat. Two layers
+# with 16 modes and 32 channels are enough for this toy.
+#
+# A **PINO** (Physics-Informed Neural Operator) is an FNO whose loss
+# additionally enforces the governing ODE residual at collocation
+# points — the same trick as a PINN, lifted to the operator. It does
+# **two** things at once: (i) learn the parametric family from a
+# handful of trajectories, and (ii) keep the family consistent with
+# the physics everywhere — including at initial conditions it has
+# never seen.
+#
+# **Plan (≈10 min runtime on a 1080Ti):**
+#
+# 1. Reuse the homework's damped oscillator $\ddot x + \gamma \dot x +
+#    k x = 0$ with $m = 1$, $k = 1$, $\gamma = 0.3$ (so $2\zeta\omega =
+#    \gamma$, $\omega^2 = k$). 256 time points on $t \in [0, 20]$.
+# 2. Build a tiny 1-D FNO and train it on **5 different ICs** (data
+#    loss only).
+# 3. Add an ODE residual term → PINO. $\lambda = 0.1$.
+# 4. Test both on **2 unseen ICs** and compare against a fresh PINN
+#    (Block 1 style, retrained per IC).
+# 5. Plot trajectories on one held-out IC for PINN / FNO / PINO.
+
+# %%
+# Step 0 — shared grid and family of initial conditions.
+torch.manual_seed(0)
+np.random.seed(0)
+
+N_T = 256
+t_op = np.linspace(0.0, T_MAX, N_T, dtype=np.float32)
+t_op_t = torch.tensor(t_op, dtype=torch.float32)
+
+def analytic_with_ic(t, x0, v0, gamma=GAMMA, k=K_SP, m=M):
+    """Closed-form underdamped solution for arbitrary IC (x(0)=x0, x'(0)=v0)."""
+    om = np.sqrt(k / m - (gamma / (2 * m)) ** 2)
+    A = x0
+    B = (v0 + (gamma / (2 * m)) * x0) / om
+    return np.exp(-gamma * t / (2 * m)) * (A * np.cos(om * t) + B * np.sin(om * t))
+
+
+# 5 training ICs + 2 held-out test ICs (x0 in [-1, 1], v0 in [-0.5, 0.5])
+rng = np.random.default_rng(11)
+ic_train = rng.uniform(low=[-1.0, -0.5], high=[1.0, 0.5], size=(5, 2)).astype(np.float32)
+ic_test  = rng.uniform(low=[-1.0, -0.5], high=[1.0, 0.5], size=(2, 2)).astype(np.float32)
+
+def make_input_field(ic, t):
+    """
+    Input function a(t) for the FNO.
+
+    A standard trick for operator learning on ICs: feed a 2-channel
+    field of (x0, v0) broadcast over the time grid, plus the time
+    coordinate itself. Shape (B, 3, N_T).
+    """
+    B = ic.shape[0]
+    x0 = np.broadcast_to(ic[:, 0:1, None], (B, 1, len(t)))
+    v0 = np.broadcast_to(ic[:, 1:2, None], (B, 1, len(t)))
+    tt = np.broadcast_to(t[None, None, :], (B, 1, len(t)))
+    return np.concatenate([x0, v0, tt], axis=1).astype(np.float32)
+
+def make_target_field(ic, t):
+    """Target trajectory under the (correct) physics. Shape (B, N_T)."""
+    return np.stack([analytic_with_ic(t, x0, v0) for (x0, v0) in ic]).astype(np.float32)
+
+
+a_train = torch.tensor(make_input_field(ic_train, t_op))   # (5, 3, 256)
+u_train = torch.tensor(make_target_field(ic_train, t_op))  # (5, 256)
+a_test  = torch.tensor(make_input_field(ic_test, t_op))
+u_test  = torch.tensor(make_target_field(ic_test, t_op))
+
+
+# %%
+# Step 1 — tiny 1-D FNO. Two spectral conv layers, 16 modes, 32 channels.
+class SpectralConv1d(nn.Module):
+    """1-D spectral convolution: truncate to `modes` Fourier modes, learn complex weights."""
+    def __init__(self, in_ch, out_ch, modes):
+        super().__init__()
+        self.in_ch, self.out_ch, self.modes = in_ch, out_ch, modes
+        scale = 1.0 / (in_ch * out_ch)
+        # Complex weights as (in_ch, out_ch, modes) with real+imag parts.
+        self.w_re = nn.Parameter(scale * torch.randn(in_ch, out_ch, modes))
+        self.w_im = nn.Parameter(scale * torch.randn(in_ch, out_ch, modes))
+
+    def forward(self, x):  # x: (B, C, N)
+        B, C, N = x.shape
+        x_ft = torch.fft.rfft(x, n=N)              # (B, C, N//2+1) complex
+        out_ft = torch.zeros(B, self.out_ch, N // 2 + 1, dtype=torch.cfloat, device=x.device)
+        w = torch.complex(self.w_re, self.w_im)    # (Cin, Cout, modes)
+        out_ft[:, :, :self.modes] = torch.einsum("bcn,cdn->bdn",
+                                                  x_ft[:, :, :self.modes], w)
+        return torch.fft.irfft(out_ft, n=N)
+
+
+class FNO1d(nn.Module):
+    def __init__(self, in_ch=3, hidden=32, modes=16, out_ch=1):
+        super().__init__()
+        self.lift = nn.Conv1d(in_ch, hidden, 1)
+        self.spec1 = SpectralConv1d(hidden, hidden, modes)
+        self.spec2 = SpectralConv1d(hidden, hidden, modes)
+        self.w1 = nn.Conv1d(hidden, hidden, 1)
+        self.w2 = nn.Conv1d(hidden, hidden, 1)
+        self.proj1 = nn.Conv1d(hidden, hidden, 1)
+        self.proj2 = nn.Conv1d(hidden, out_ch, 1)
+
+    def forward(self, a):
+        h = self.lift(a)
+        h = F.gelu(self.spec1(h) + self.w1(h))
+        h = F.gelu(self.spec2(h) + self.w2(h))
+        h = F.gelu(self.proj1(h))
+        return self.proj2(h).squeeze(1)            # (B, N_T)
+
+
+def train_fno(model, a_train, u_train, n_epochs=1500, lr=1e-3,
+              physics_loss=False, lam_phys=0.1, log_every=500):
+    """Train an FNO; if physics_loss=True, add ODE residual → PINO."""
+    opt = torch.optim.Adam(model.parameters(), lr=lr)
+    t_phys = t_op_t.clone()                        # (N_T,)
+    for ep in range(n_epochs):
+        opt.zero_grad()
+        pred = model(a_train)                      # (B, N_T)
+        loss_data = F.mse_loss(pred, u_train)
+        loss = loss_data
+        if physics_loss:
+            # PINO residual: need d/dt of pred. Make the time channel
+            # of the input require grad, recompute, autograd through it.
+            a_g = a_train.clone()
+            a_g.requires_grad_(True)
+            pred_g = model(a_g)                    # (B, N_T)
+            # d(pred) / d(t-channel of input). Sum over batch & time.
+            grad_a = torch.autograd.grad(pred_g.sum(), a_g, create_graph=True)[0]
+            # t-channel is index 2 in (B,3,N_T); chain rule: ∂x/∂t = grad_a[:,2,:]
+            dxdt = grad_a[:, 2, :]
+            # 2nd derivative w.r.t. t-channel.
+            grad2 = torch.autograd.grad(dxdt.sum(), a_g, create_graph=True)[0]
+            d2xdt2 = grad2[:, 2, :]
+            res = M * d2xdt2 + GAMMA * dxdt + K_SP * pred_g
+            loss_phys = (res ** 2).mean()
+            loss = loss + lam_phys * loss_phys
+        loss.backward(); opt.step()
+        if (ep + 1) % log_every == 0:
+            tag = "PINO" if physics_loss else "FNO"
+            print(f"  [{tag}] epoch {ep+1:4d}  loss = {loss.item():.5f}")
+    return model
+
+
+print("Exercise 5 — training tiny 1-D FNO (data only)...")
+torch.manual_seed(0)
+fno = FNO1d()
+fno = train_fno(fno, a_train, u_train, n_epochs=1500, physics_loss=False)
+
+print("Exercise 5 — training tiny 1-D PINO (data + 0.1 * ODE residual)...")
+torch.manual_seed(0)
+pino = FNO1d()
+pino = train_fno(pino, a_train, u_train, n_epochs=1500, physics_loss=True, lam_phys=0.1)
+
+
+# %%
+# Step 2 — baseline: retrain a PINN per held-out IC (no observations,
+# only BCs from the IC + the ODE residual). This is the apples-to-apples
+# competitor: the PINN has *no* training trajectories, just physics +
+# the two boundary values (x0, v0).
+def train_pinn_for_ic(x0, v0, n_epochs=2000, lr=5e-3, lam_phys=1.0, lam_bc=1.0, seed=0):
+    torch.manual_seed(seed)
+    model = MLP()
+    opt = torch.optim.Adam(model.parameters(), lr=lr)
+    t_zero = torch.zeros(1, 1, dtype=torch.float32, requires_grad=True)
+    t_coll_ex = torch.linspace(0, T_MAX, 200, dtype=torch.float32).unsqueeze(-1)
+    for _ in range(n_epochs):
+        opt.zero_grad()
+        res = ode_residual(model, t_coll_ex)
+        loss_phys = (res ** 2).mean()
+        x0_pred = model(t_zero)
+        dxdt0 = torch.autograd.grad(x0_pred.sum(), t_zero, create_graph=True)[0]
+        loss_bc = (x0_pred - x0).pow(2).mean() + (dxdt0 - v0).pow(2).mean()
+        loss = lam_phys * loss_phys + lam_bc * loss_bc
+        loss.backward(); opt.step()
+    return model
+
+
+# Evaluation helpers
+def fno_predict(model, ic):
+    a = torch.tensor(make_input_field(ic, t_op))
+    with torch.no_grad():
+        return model(a).numpy()                    # (B, N_T)
+
+def pinn_predict(model):
+    with torch.no_grad():
+        return model(t_op_t.unsqueeze(-1)).numpy() # (N_T,)
+
+def ode_residual_curve(traj_np, t_np, gamma=GAMMA, k=K_SP, m=M):
+    """Finite-difference residual of m*x'' + gamma*x' + k*x along a trajectory."""
+    dt = t_np[1] - t_np[0]
+    dx = np.gradient(traj_np, dt)
+    d2x = np.gradient(dx, dt)
+    return m * d2x + gamma * dx + k * traj_np
+
+
+fno_pred_test  = fno_predict(fno, ic_test)         # (2, 256)
+pino_pred_test = fno_predict(pino, ic_test)
+pinn_pred_test = np.stack([
+    pinn_predict(train_pinn_for_ic(x0, v0)) for (x0, v0) in ic_test
+])
+
+u_test_np = u_test.numpy()
+mse_data_pinn = np.mean((pinn_pred_test - u_test_np) ** 2, axis=1)
+mse_data_fno  = np.mean((fno_pred_test  - u_test_np) ** 2, axis=1)
+mse_data_pino = np.mean((pino_pred_test - u_test_np) ** 2, axis=1)
+
+mse_res_pinn = np.array([np.mean(ode_residual_curve(p, t_op) ** 2) for p in pinn_pred_test])
+mse_res_fno  = np.array([np.mean(ode_residual_curve(p, t_op) ** 2) for p in fno_pred_test])
+mse_res_pino = np.array([np.mean(ode_residual_curve(p, t_op) ** 2) for p in pino_pred_test])
+
+print("Exercise 5 — held-out ICs:", ic_test.tolist())
+print("                       data MSE         residual MSE")
+for i in range(2):
+    print(f"  IC {i}  PINN : {mse_data_pinn[i]:.5f}     {mse_res_pinn[i]:.5f}")
+    print(f"         FNO  : {mse_data_fno[i]:.5f}     {mse_res_fno[i]:.5f}")
+    print(f"         PINO : {mse_data_pino[i]:.5f}     {mse_res_pino[i]:.5f}")
+
+
+# %%
+# Step 3 — plot trajectories on the first held-out IC for PINN / FNO / PINO.
+fig, axes = plt.subplots(1, 3, figsize=(15, 4.5), sharex=True, sharey=True)
+i_show = 0
+x0_show, v0_show = ic_test[i_show]
+for ax, (name, pred, mse_d, mse_r) in zip(
+    axes,
+    [("PINN (per-IC, physics only)", pinn_pred_test[i_show], mse_data_pinn[i_show], mse_res_pinn[i_show]),
+     ("FNO  (data only, 5 train ICs)", fno_pred_test[i_show],  mse_data_fno[i_show],  mse_res_fno[i_show]),
+     ("PINO (data + ODE residual)",   pino_pred_test[i_show],  mse_data_pino[i_show], mse_res_pino[i_show])],
+):
+    ax.plot(t_op, u_test_np[i_show], "k-", lw=1.5, label="analytic")
+    ax.plot(t_op, pred, lw=2, label=name.split()[0])
+    ax.set_title(f"{name}\nMSE data {mse_d:.4f},  MSE res {mse_r:.4f}")
+    ax.set_xlabel("$t$  (s)"); ax.grid(alpha=0.3); ax.legend(fontsize=8, loc="upper right")
+axes[0].set_ylabel("$x(t)$")
+fig.suptitle(f"Exercise 5 — held-out IC (x0={x0_show:.2f}, v0={v0_show:.2f}): PINN vs FNO vs PINO")
+plt.tight_layout()
+plt.show()
+
+
+# %% [markdown]
+# What you should read off:
+#
+# - **PINN (per-IC).** Trained only on physics + the two boundary
+#   values for *this* IC, so it nails the data MSE *and* the residual
+#   MSE — but it took a fresh 2000-epoch training run *per IC*.
+# - **FNO (data only).** Generalises to new ICs from only 5 training
+#   trajectories — but because its loss never saw the ODE, the
+#   residual MSE on held-out ICs can be visibly worse than the PINN.
+# - **PINO.** The same architecture as the FNO, but with the residual
+#   term in the loss ($\lambda = 0.1$). Typically matches or beats the
+#   FNO on data MSE *and* slashes the residual MSE — the operator now
+#   "knows" the physics it is supposed to respect, so it generalises
+#   to unseen ICs in a physics-consistent way.
+#
+# This is the headline of Li et al. (PINO) [@li_2024_pino]: a neural
+# operator with a physics loss term is the operator-level analogue of a
+# PINN, and it inherits both the operator-learning generalisation and
+# the physics consistency. The same idea scales to the FNO papers'
+# Burgers, Darcy, and Navier-Stokes settings — replace the 1-D ODE
+# residual with the PDE residual, and the rest of the recipe is
+# unchanged.
+
+
+# %% [markdown]
+# ### Lecture-only side note — GNN PDE solvers (MeshGraphNets)
+#
+# FNOs assume the input function lives on a **regular grid** (FFT
+# requires it). Many materials problems live on **irregular meshes**:
+# microstructure FE simulations, cloth/solid simulations, atomistic
+# graphs. For those, the operator-learning analogue is a **GNN PDE
+# solver** such as **MeshGraphNets** [@pfaff_2021_meshgraphnets] —
+# message-passing over the mesh with edge features encoding local
+# geometry, trained to predict per-node state updates.
+#
+# MeshGraphNets is *too heavy* for a 10-minute exercise (the canonical
+# implementation needs ~1 GPU-day even on small flag-flapping
+# benchmarks), so we leave it as a **lecture-only reference**. The
+# PyTorch reference implementation is the one shipped with Pfaff et
+# al. 2021; the takeaway for materials work is: when your domain is a
+# mesh, swap the FNO's spectral conv for a GNN message-passing layer
+# and keep everything else (loss, optimiser, evaluation protocol)
+# identical.
+
+
+# %% [markdown]
 # ## Exam-aligned must-know statements
 #
 # Re-read these after the exercises; today's blocks have given you the
@@ -747,3 +1044,10 @@ plt.show()
 # 10. **Inverse PINNs** treat physics constants as learnable parameters
 #     — the same loss recovers both the trajectory and the parameters.
 #     (Exercise 4.)
+# 11. **FNO / PINO** learn a *solution operator* (IC or parameter →
+#     trajectory). The PINO loss adds the PDE residual to an FNO; this
+#     gives operator-level generalisation **and** physics consistency
+#     on unseen ICs. (Exercise 5; Li et al. 2024 [@li_2024_pino].)
+# 12. **MeshGraphNets** is the GNN analogue for irregular meshes —
+#     same recipe (learn local updates), different message-passing
+#     backbone. Lecture-only reference [@pfaff_2021_meshgraphnets].

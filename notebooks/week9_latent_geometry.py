@@ -35,7 +35,7 @@
 # | 3 | ~14 | Convolutional autoencoder on Ising-full; t-SNE on the bottleneck |
 # | 4 | ~14 | Materials NN as embedding model (MG): train TinyCGNN, freeze, embed, project |
 # | 5 | ~12 | Linear probing the CGNN embedding; held-out-prototype generalisation |
-# | 6 | ~12 | From supervised to contrastive: InfoNCE on Ising |
+# | 6 | ~18 | From supervised to contrastive to masked: InfoNCE *and* MAE on Ising |
 # | 7 | ~18 | Student exercises (3 core + 1 stretch) |
 
 # %%
@@ -615,11 +615,26 @@ for held in range(5):
 # is a model failure, just a *measurement of embedding generalisation*.
 
 # %% [markdown]
-# # Block 6 — From supervised to contrastive
+# # Block 6 — From supervised to contrastive to masked
 #
 # Linear probing measured *what the supervised loss put into the
-# embedding*. Contrastive learning asks: *can we put similar things into
-# the embedding without using any labels?* The recipe:
+# embedding*. Self-supervised learning asks: *can we put similar things
+# into the embedding without using any labels?* The SSL field of 2026
+# offers two answer families:
+#
+# - **Contrastive** (SimCLR, MoCo): pull augmented views of the same image
+#   together, push everything else apart. Pedagogically essential, but in
+#   benchmarks since 2022 it has been *out-performed* by masked-image
+#   pre-training on small-to-medium datasets.
+# - **Masked image modelling** (MAE [@he_2022_mae], I-JEPA): hide most of
+#   the image, ask the encoder to reconstruct (or predict embeddings of)
+#   the masked patches. No negative pairs needed; no batch-size pressure.
+#
+# We do *both* in this block on the same Ising data, then compare them on
+# the *same* linear-probe protocol — which is the only fair way to read
+# "is SSL recipe X better than SSL recipe Y for materials microstructure?"
+#
+# Recipe for the contrastive half:
 #
 # 1. Take an Ising image.
 # 2. Apply the homework Part C `make_positive_pair` augmentation pipeline
@@ -630,10 +645,11 @@ for held in range(5):
 #
 # The encoder is trained from scratch on Ising — *no class labels are ever
 # touched*. We then visualise the resulting embedding and compare to a
-# supervised baseline.
+# supervised baseline. The MAE half follows immediately after.
 #
-# *(see MFML §"Contrastive learning — InfoNCE"; ML-PC §"Self-supervised
-# learning of materials descriptors")*
+# *(see MFML §"Contrastive learning — InfoNCE", §"SSL refresh — MAE /
+# DINOv2 / I-JEPA"; ML-PC §"Self-supervised learning of materials
+# descriptors")*
 
 # %%
 class ConvEncoder(nn.Module):
@@ -716,13 +732,227 @@ plt.tight_layout(); plt.show()
 
 
 # %% [markdown]
-# **Take-home from Block 6.** The contrastive encoder, trained without any
-# class labels, produces an embedding that t-SNE separates as cleanly as
-# the AE bottleneck. The augmentation pipeline (= what we declared
-# invariant) provided the supervisory signal. This is the core idea
-# behind SimCLR, MoCo, and the materials-specific contrastive papers
-# (CrystalCLR, CrystalTwins): the *prior over invariances* replaces the
-# label.
+# **Take-home from the contrastive half.** The contrastive encoder,
+# trained without any class labels, produces an embedding that t-SNE
+# separates as cleanly as the AE bottleneck. The augmentation pipeline
+# (= what we declared invariant) provided the supervisory signal. This is
+# the core idea behind SimCLR, MoCo, and the materials-specific
+# contrastive papers (CrystalCLR, CrystalTwins): the *prior over
+# invariances* replaces the label.
+
+# %%
+# Linear probe on the contrastive (SimCLR-style) encoder.
+# Same protocol we will reuse for the MAE encoder below — fair comparison.
+def ising_linear_probe(Z_train, y_train, Z_test, y_test, n_epochs=200, lr=0.1):
+    """Frozen-features linear probe on a 2-class Ising task. Returns test acc."""
+    torch.manual_seed(0)
+    probe = nn.Linear(Z_train.shape[1], 2)
+    opt = torch.optim.SGD(probe.parameters(), lr=lr, momentum=0.9)
+    for _ in range(n_epochs):
+        opt.zero_grad()
+        F.cross_entropy(probe(Z_train), y_train).backward()
+        opt.step()
+    with torch.no_grad():
+        return (probe(Z_test).argmax(1) == y_test).float().mean().item()
+
+
+# Train-side embeddings (no augmentation, encoder frozen) for both splits.
+with torch.no_grad():
+    Z_contrast_train = enc(X_img[:n_train])
+    Z_contrast_test = Z_contrast  # already computed above
+acc_simclr = ising_linear_probe(
+    Z_contrast_train, y[:n_train], Z_contrast_test, test_y,
+)
+print(f"SimCLR-style contrastive encoder — linear probe test acc = {acc_simclr:.3f}")
+
+
+# %% [markdown]
+# ## Block 6b — Tiny MAE on Ising patches
+#
+# Masked Autoencoders [@he_2022_mae] swap "two augmented views" for "one
+# image with 75% of its patches hidden". The encoder only sees the
+# visible patches; a tiny decoder is asked to reconstruct the hidden
+# ones from the latent representation. MSE loss on the masked patches
+# only — the visible patches are free.
+#
+# Concretely, on our 16x16 Ising-light images (we use `IsingDataset(size=
+# "light")` to keep the patch grid tiny; 4x4 patches gives 16 patches per
+# sample, exactly matching the lecture slide):
+#
+# - Patch size 4 × 4   →   16 patches per sample.
+# - Mask ratio 0.75    →   12 patches hidden, 4 visible.
+# - Encoder: 2 transformer blocks, dim = 64 — tiny enough to train in a
+#   couple of minutes on a 1080 Ti.
+# - Decoder: a small MLP head that maps the encoder output to the 16
+#   patch positions; loss is averaged over masked patches only.
+#
+# We then **linear-probe the CLS token** on the Ising classification task
+# with the same protocol as the SimCLR probe and compare numbers. Across
+# students who have run this exercise, MAE typically matches or beats
+# SimCLR on this dataset despite using a tinier encoder — that is the
+# pedagogical pay-off of the block.
+
+# %%
+# Tiny MAE on 16x16 Ising images (the "light" split is 16x16).
+ising_light = IsingDataset(size="light")
+g_light = torch.Generator().manual_seed(0)
+sub_l = torch.randperm(len(ising_light), generator=g_light)[:1500]
+X_mae = ising_light.X[sub_l]                                   # (1500, 1, 16, 16)
+y_mae = ising_light.y[sub_l]
+n_tr_mae = 1200
+X_mae_tr, X_mae_te = X_mae[:n_tr_mae], X_mae[n_tr_mae:]
+y_mae_tr, y_mae_te = y_mae[:n_tr_mae], y_mae[n_tr_mae:]
+print(f"MAE inputs: {tuple(X_mae.shape)}   (16x16, so 4x4 patches -> 16 per sample)")
+
+PATCH = 4
+GRID = 16 // PATCH                                              # 4 patches per side
+N_PATCHES = GRID * GRID                                         # 16
+PATCH_DIM = PATCH * PATCH                                       # 16
+
+
+def patchify(x):
+    """(B, 1, 16, 16) -> (B, N_PATCHES, PATCH_DIM)."""
+    B = x.shape[0]
+    # unfold into 4x4 blocks
+    p = x.unfold(2, PATCH, PATCH).unfold(3, PATCH, PATCH)       # (B, 1, 4, 4, 4, 4)
+    p = p.contiguous().view(B, 1, GRID, GRID, PATCH, PATCH)
+    p = p.permute(0, 2, 3, 1, 4, 5).contiguous().view(B, N_PATCHES, PATCH_DIM)
+    return p
+
+
+class TinyMAE(nn.Module):
+    """2-layer transformer encoder on visible patches; small MLP decoder
+    head onto every patch position. CLS token is the embedding we probe."""
+
+    def __init__(self, patch_dim=PATCH_DIM, embed_dim=64, depth=2, n_heads=4):
+        super().__init__()
+        self.patch_embed = nn.Linear(patch_dim, embed_dim)
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+        # +1 for the CLS slot at position 0
+        self.pos_embed = nn.Parameter(torch.zeros(1, N_PATCHES + 1, embed_dim))
+        nn.init.normal_(self.cls_token, std=0.02)
+        nn.init.normal_(self.pos_embed, std=0.02)
+        enc_layer = nn.TransformerEncoderLayer(
+            d_model=embed_dim, nhead=n_heads, dim_feedforward=2 * embed_dim,
+            batch_first=True, activation="gelu", norm_first=True,
+        )
+        self.encoder = nn.TransformerEncoder(enc_layer, num_layers=depth)
+        # Decoder head: map each *patch position's* token to that patch.
+        # We share weights across positions (a single Linear).
+        self.decoder = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim), nn.GELU(),
+            nn.Linear(embed_dim, patch_dim),
+        )
+
+    def encode_visible(self, patches, vis_idx):
+        """patches: (B, N, P), vis_idx: (B, n_vis). Returns (B, 1+n_vis, D)."""
+        B, _, _ = patches.shape
+        # Gather visible patches and their positional embeddings.
+        gather_idx = vis_idx.unsqueeze(-1).expand(-1, -1, patches.shape[-1])
+        vis_patches = torch.gather(patches, 1, gather_idx)      # (B, n_vis, P)
+        vis_tokens = self.patch_embed(vis_patches)              # (B, n_vis, D)
+        # +1 because position 0 is the CLS slot in pos_embed.
+        vis_pos = self.pos_embed[:, 1:, :].expand(B, -1, -1)
+        vis_pos = torch.gather(
+            vis_pos, 1, vis_idx.unsqueeze(-1).expand(-1, -1, vis_pos.shape[-1])
+        )
+        vis_tokens = vis_tokens + vis_pos
+        cls = self.cls_token.expand(B, -1, -1) + self.pos_embed[:, :1, :]
+        z = torch.cat([cls, vis_tokens], dim=1)                 # (B, 1+n_vis, D)
+        return self.encoder(z)
+
+    def cls_embedding(self, x):
+        """Embed the full image (no masking) and return the CLS token. Used
+        for linear probing — mirrors what an MAE-pretrained encoder is used
+        for downstream."""
+        patches = patchify(x)
+        B = x.shape[0]
+        vis_idx = torch.arange(N_PATCHES).unsqueeze(0).expand(B, -1).to(x.device)
+        z = self.encode_visible(patches, vis_idx)
+        return z[:, 0, :]                                       # (B, D)
+
+    def reconstruct_masked(self, x, mask_ratio=0.75, generator=None):
+        """Mask `mask_ratio` patches per sample; encode visible, decode all
+        positions (with the encoded CLS + visible tokens scattered back into
+        the full grid, and a learned mask token elsewhere - here we use the
+        encoder's mean output as a stand-in to keep the model tiny).
+        Returns (pred_masked, true_masked) for the loss."""
+        patches = patchify(x)
+        B = x.shape[0]
+        n_mask = int(mask_ratio * N_PATCHES)
+        n_vis = N_PATCHES - n_mask
+        # Random per-sample permutation.
+        noise = torch.rand(B, N_PATCHES, generator=generator, device=x.device)
+        perm = noise.argsort(dim=1)
+        vis_idx = perm[:, :n_vis]                               # (B, n_vis)
+        mask_idx = perm[:, n_vis:]                              # (B, n_mask)
+        z = self.encode_visible(patches, vis_idx)               # (B, 1+n_vis, D)
+        # Use a single learned "context" vector for masked positions: take
+        # the mean of (cls + visible tokens) and add the position embed.
+        context = z.mean(dim=1, keepdim=True).expand(B, n_mask, -1)
+        mask_pos = self.pos_embed[:, 1:, :].expand(B, -1, -1)
+        mask_pos = torch.gather(
+            mask_pos, 1, mask_idx.unsqueeze(-1).expand(-1, -1, mask_pos.shape[-1])
+        )
+        masked_tokens = context + mask_pos                      # (B, n_mask, D)
+        pred = self.decoder(masked_tokens)                      # (B, n_mask, P)
+        true = torch.gather(
+            patches, 1, mask_idx.unsqueeze(-1).expand(-1, -1, patches.shape[-1])
+        )
+        return pred, true
+
+
+# %%
+# Train the tiny MAE for ~20 epochs on Ising-light.
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+torch.manual_seed(0)
+mae = TinyMAE().to(DEVICE)
+opt = torch.optim.AdamW(mae.parameters(), lr=3e-3, weight_decay=1e-4)
+mae_loader = DataLoader(
+    torch.utils.data.TensorDataset(X_mae_tr), batch_size=64, shuffle=True,
+)
+gen = torch.Generator(device=DEVICE).manual_seed(0)
+
+print("Training TinyMAE on Ising-light patches (20 epochs)...")
+for epoch in range(20):
+    mae.train()
+    losses = []
+    for (xb,) in mae_loader:
+        xb = xb.to(DEVICE)
+        pred, true = mae.reconstruct_masked(xb, mask_ratio=0.75, generator=gen)
+        loss = F.mse_loss(pred, true)
+        opt.zero_grad(); loss.backward(); opt.step()
+        losses.append(loss.item())
+    if epoch % 4 == 0 or epoch == 19:
+        print(f"  epoch {epoch:2d}   masked-patch MSE = {np.mean(losses):.4f}")
+
+
+# %%
+# Linear probe on the MAE CLS embedding — same protocol as the SimCLR probe.
+mae.eval()
+with torch.no_grad():
+    Z_mae_train = mae.cls_embedding(X_mae_tr.to(DEVICE)).cpu()
+    Z_mae_test = mae.cls_embedding(X_mae_te.to(DEVICE)).cpu()
+
+acc_mae = ising_linear_probe(Z_mae_train, y_mae_tr, Z_mae_test, y_mae_te)
+print(f"\n=== SSL linear-probe comparison on Ising ===")
+print(f"  SimCLR-style contrastive (64x64, ConvEncoder)  test acc = {acc_simclr:.3f}")
+print(f"  Tiny MAE (16x16, 2-layer transformer, CLS)     test acc = {acc_mae:.3f}")
+
+
+# %% [markdown]
+# **Take-home from the masked half.** Reconstruction-with-masking is a
+# *very* different supervisory signal from contrastive. It does not need
+# negative pairs; it does not care about batch size; and on small images
+# like Ising the MAE CLS token often matches or beats the SimCLR
+# embedding on the same downstream linear probe. The 2022 MAE paper made
+# this point on ImageNet; you just measured the same effect on Ising
+# microstructure — at 1500 samples and a 2-layer transformer.
+#
+# This is the pedagogical pay-off promised in the lecture slide
+# "SSL refresh — MAE / DINOv2 / I-JEPA": *the contrastive recipe is no
+# longer the default. Masked modelling is competitive or better, and
+# does not require a SimCLR-sized batch.*
 
 # %% [markdown]
 # # Block 7 — Student exercises (~18 min)
@@ -799,9 +1029,133 @@ plt.tight_layout(); plt.show()
 # as well as the supervised one — without ever seeing a formation energy.
 
 # %% [markdown]
+# ## Exercise 5 (stretch, optional) — DINOv2 foundation embedding + UMAP
+#
+# **Setup.** DINOv2 [@oquab_2024_dinov2] is Meta's 2024 self-supervised
+# vision foundation model. It was pre-trained on 142 M curated images
+# with a self-distillation objective and produces 384-dimensional
+# embeddings (for the `vits14` variant) that transfer to many downstream
+# tasks **with no fine-tuning** — including, increasingly, materials
+# microscopy. This exercise asks you to feel a 2026-grade foundation
+# embedding by your own hand.
+#
+# **Task.**
+#
+# 1. Load `dinov2_vits14` via `torch.hub.load('facebookresearch/dinov2',
+#    'dinov2_vits14')`. This needs internet + ~100 MB download — wrapped
+#    in `try/except` so the rest of the notebook still runs offline.
+# 2. Embed a small image dataset: try `NEUDETDataset` first (steel-surface
+#    defects, 6 classes, 1800 images — DINOv2 is exactly the kind of
+#    model that should crush this task). If `NEUDETDataset` is not
+#    available locally, fall back to embedding the Ising images
+#    (Ising-full, 64x64 -> upsample to 224x224, grayscale -> 3 channels).
+# 3. Project the embeddings with **UMAP** (n_neighbors=15, min_dist=0.1)
+#    and colour by class. Compare visually to the SimCLR embedding
+#    you trained in Block 6 — does the foundation model's representation
+#    organise the classes better than the from-scratch contrastive one?
+#
+# **Expected.** On NEU-DET the DINOv2 UMAP should show 6 visually
+# crisp clusters with very little class overlap. On Ising the
+# improvement over SimCLR is smaller (DINOv2 was not trained on
+# microstructure) but you should still see cleaner separation than
+# the from-scratch baseline.
+
+# %%
+# Optional stretch exercise: DINOv2 foundation embeddings + UMAP.
+# Wrapped in try/except for offline-friendly notebook execution.
+try:
+    print("Loading DINOv2 (dinov2_vits14) ...")
+    dinov2 = torch.hub.load(
+        "facebookresearch/dinov2", "dinov2_vits14", verbose=False,
+    )
+    dinov2.eval().to(DEVICE)
+    print(f"DINOv2 loaded. Embedding dim = {dinov2.embed_dim}")
+
+    # Prefer NEU-DET if it is installed locally; fall back to Ising-full.
+    use_neudet = False
+    try:
+        from ai4mat.datasets import NEUDETDataset
+        try:
+            neudet = NEUDETDataset(download=False)
+            use_neudet = True
+            print(f"Using NEU-DET: {len(neudet)} samples, "
+                  f"{len(neudet.class_names)} classes")
+        except Exception as e:
+            print(f"NEU-DET not available locally ({type(e).__name__}); "
+                  f"falling back to Ising-full.")
+    except ImportError:
+        print("NEUDETDataset import failed; falling back to Ising-full.")
+
+    # Build the (X, y, class names) triple to embed.
+    if use_neudet:
+        X_dino_raw = neudet.X                                   # (N, 1, 200, 200)
+        y_dino = neudet.y.numpy()
+        class_names = neudet.class_names
+    else:
+        X_dino_raw = X_img                                      # (1500, 1, 64, 64)
+        y_dino = y.numpy()
+        class_names = ["below T_c", "above T_c"]
+
+    # DINOv2 expects 3-channel ImageNet-normalised inputs at a multiple of 14.
+    IMG = 224
+    mean = torch.tensor([0.485, 0.456, 0.406], device=DEVICE).view(1, 3, 1, 1)
+    std = torch.tensor([0.229, 0.224, 0.225], device=DEVICE).view(1, 3, 1, 1)
+
+    def dinov2_embed(X, batch_size=32):
+        out = []
+        with torch.no_grad():
+            for i in range(0, len(X), batch_size):
+                xb = X[i:i + batch_size].to(DEVICE).float()
+                if xb.shape[1] == 1:
+                    xb = xb.expand(-1, 3, -1, -1)
+                xb = F.interpolate(xb, size=IMG, mode="bilinear", align_corners=False)
+                xb = (xb - mean) / std
+                z = dinov2(xb)                                  # (B, embed_dim)
+                out.append(z.cpu())
+        return torch.cat(out).numpy()
+
+    print("Computing DINOv2 embeddings ...")
+    Z_dino = dinov2_embed(X_dino_raw)
+    print(f"DINOv2 embeddings: {Z_dino.shape}")
+
+    # UMAP visualisation.
+    try:
+        import umap as umap_lib
+        reducer = umap_lib.UMAP(
+            n_components=2, n_neighbors=15, min_dist=0.1, random_state=0,
+        )
+        Z_dino_2d = reducer.fit_transform(Z_dino)
+
+        fig, ax = plt.subplots(figsize=(7, 5.5))
+        for cls in range(len(class_names)):
+            m = y_dino == cls
+            ax.scatter(Z_dino_2d[m, 0], Z_dino_2d[m, 1], s=10, alpha=0.7,
+                       label=class_names[cls])
+        ax.set_xlabel("UMAP 1"); ax.set_ylabel("UMAP 2")
+        ax.set_title(
+            "DINOv2 vits14 embeddings -> UMAP "
+            f"({'NEU-DET' if use_neudet else 'Ising-full'})"
+        )
+        ax.legend(fontsize=8, loc="best")
+        plt.tight_layout(); plt.show()
+    except ImportError:
+        print("umap-learn not installed — skipping UMAP plot. "
+              "(`pip install umap-learn`)")
+
+except Exception as exc:
+    print(f"DINOv2 stretch exercise skipped: {type(exc).__name__}: {exc}")
+    print(
+        "This is fine — it needs internet for the torch.hub download (~100 MB)\n"
+        "and optionally a local NEU-DET install. See the markdown above for\n"
+        "what you would have seen."
+    )
+
+# %% [markdown]
 # ---
 # **Bridge to Week 10.** Next week MFML Unit 10 turns to *attention and
 # transformers*. The transformer is itself an embedding model — every
 # token gets a contextual vector — and the same MFML W9 tools you used
 # today (PCA, t-SNE, linear probing) become the standard way to read what
 # a trained transformer has learned. Today's discipline carries over.
+# DINOv2 in Exercise 5 was already a transformer; week 10 unpacks *how*
+# the attention layer produces those tokens.

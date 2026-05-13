@@ -6,10 +6,12 @@
 # under a target property.**
 #
 # 1. **MFML Unit 11**: Generative models — VAE, β-VAE, conditional VAE,
-#    DDPM forward and reverse processes, score matching.
+#    DDPM as historical anchor, **flow matching** as the 2026 default
+#    [@lipman_2023_flow_matching], **consistency models** for one-step
+#    sampling [@song_2023_consistency].
 # 2. **ML-PC Unit 11** (delivered title; folder still
 #    `unit09_inverse_problems`): generative inverse design — VAE-based
-#    property targeting, diffusion-based microstructure generation,
+#    property targeting, **flow-matching-based** microstructure generation,
 #    failure modes (mode collapse, OOD targets).
 # 3. **MG Unit 10** (delivered as W11): latent spaces of materials —
 #    composition–structure–property maps, **latent-space arithmetic for
@@ -34,7 +36,7 @@
 # | 1 | ~6  | Recap from homework — VAE, ELBO, β trade-off |
 # | 2 | ~14 | Conditional VAE on Cahn–Hilliard — generation under target free energy |
 # | 3 | ~14 | Latent-space gradient descent — inverse design as differentiable optimization |
-# | 4 | ~14 | DDPM forward + train tiny reverse model on GPU; sample (CPU fallback: forward-only) |
+# | 4 | ~14 | Flow matching — train tiny ODE-velocity U-Net; 10-step Heun sampling |
 # | 5 | ~14 | Materials latent-space arithmetic — stability axis on CGNN embeddings (MG W11) |
 # | 6 | ~10 | Honest limitations — mode collapse, posterior collapse, OOD generation |
 # | 7 | ~18 | Student exercises (3 core) |
@@ -380,60 +382,64 @@ plt.tight_layout(); plt.show()
 # generation, latent-GD for refinement.
 
 # %% [markdown]
-# # Block 4 — DDPM forward + train tiny reverse model
+# # Block 4 — Flow matching for inverse design
 #
-# The other major generative family: **denoising diffusion probabilistic
-# models** (DDPM). The forward process gradually adds Gaussian noise:
+# **Pedagogical anchor — DDPM then flow matching.** The other major
+# generative family used to be **DDPM** (denoising diffusion probabilistic
+# models): an *SDE-based* generator with a noisy forward process
 #
 # $$
-# q(x_t \mid x_0) = \mathcal{N}(\sqrt{\bar\alpha_t}\, x_0,\, (1 - \bar\alpha_t) I)
+# q(x_t \mid x_0) = \mathcal{N}\!\big(\sqrt{\bar\alpha_t}\, x_0,\, (1 - \bar\alpha_t) I\big)
 # $$
 #
-# The reverse process is a *learned* sequence of denoising steps. Training
-# is one line: a U-Net predicts the noise $\varepsilon$ given $(x_t, t)$.
-# Sampling is "draw noise, denoise step by step".
+# and a learned, *stochastic*, 1000-step reverse process that predicts the
+# noise $\varepsilon_\theta(x_t, t)$. DDPM is what got the field excited in
+# 2020; we keep the equation above as a historical anchor and move on.
 #
-# We build the forward process (no training; just visualise it), then —
-# **if a GPU is available** — train a tiny U-Net DDPM and visualise
-# samples from the trained reverse process.
+# In 2026 the **default new image generator is flow matching**
+# [@lipman_2023_flow_matching]: an *ODE-based* generator with a *simpler
+# loss* and *fewer sampling steps*. Same U-Net backbone, different
+# training target. The recipe is:
 #
-# *(see MFML §"DDPM — forward and reverse process", §"Score matching")*
+# - **Forward path** (no learning): sample $x_0 \sim \mathcal{N}(0, I)$
+#   and $x_1$ from data. Sample $t \sim \mathrm{Uniform}(0, 1)$ and form
+#   the linear interpolant $x_t = (1 - t) x_0 + t x_1$.
+# - **Target velocity:** $u^*(x_t, t) = x_1 - x_0$.
+# - **Loss:** $\mathcal{L} = \| u_\theta(x_t, t) - u^* \|^2$.
+# - **Sample:** start from $x \leftarrow x_0 \sim \mathcal{N}(0, I)$ and
+#   integrate the learned ODE $\dot x = u_\theta(x, t)$ from $t = 0$ to
+#   $t = 1$ with a small number of solver steps.
+#
+# DDPM and flow matching share the U-Net; flow matching replaces "predict
+# noise on a noisy schedule" with "predict the straight-line velocity",
+# which trains faster and samples in **10 ODE steps** instead of hundreds.
+#
+# *(see MFML §"Flow matching"; ML-PC §"Flow-matching microstructure
+# inverse design")*
 
 # %%
-# Forward process visualisation.  No training; just q(x_t | x_0).
-T = 200                                                    # total diffusion steps
-betas = torch.linspace(1e-4, 0.02, T, device=DEVICE)       # linear schedule
-alphas = 1 - betas
-alpha_bars = torch.cumprod(alphas, dim=0)
-
-
-def q_sample(x0, t, eps=None):
-    """Sample x_t from x_0 in one step."""
-    if eps is None:
-        eps = torch.randn_like(x0)
-    a_bar = alpha_bars[t].view(-1, 1, 1, 1)
-    return torch.sqrt(a_bar) * x0 + torch.sqrt(1 - a_bar) * eps, eps
-
-
-# Plot forward trajectory of one CH image.
-x0_demo = X_tr[0:1]
-t_show = [0, 25, 50, 100, 150, 199]
+# Visualise the linear interpolant x_t = (1-t) x_0 + t x_1 used by flow
+# matching.  No training; just forward path inspection.
+x1_demo = X_tr[0:1]                                        # one data sample
+x0_demo = torch.randn_like(x1_demo)                        # one Gaussian sample
+t_show = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
 fig, axes = plt.subplots(1, 6, figsize=(13, 2.5))
 for i, t_i in enumerate(t_show):
-    t_tensor = torch.tensor([t_i], device=DEVICE)
-    x_t, _ = q_sample(x0_demo, t_tensor)
-    axes[i].imshow(x_t[0, 0].cpu().numpy(), cmap="gray")
-    axes[i].set_title(f"t = {t_i}", fontsize=9); axes[i].axis("off")
-plt.suptitle(f"DDPM forward process q(x_t | x_0) — CH image, T={T}")
+    x_t_demo = (1 - t_i) * x0_demo + t_i * x1_demo
+    axes[i].imshow(x_t_demo[0, 0].cpu().numpy(), cmap="gray")
+    axes[i].set_title(f"t = {t_i:.1f}", fontsize=9); axes[i].axis("off")
+plt.suptitle("Flow-matching interpolant x_t = (1-t) x_0 + t x_1  (no training)")
 plt.tight_layout(); plt.show()
 
 
 # %%
 class TinyUNet(nn.Module):
-    """Minimal U-Net for the DDPM reverse process.  64x64 in/out;
+    """Minimal U-Net for the flow-matching velocity field.  64x64 in/out;
     sinusoidal time embedding; channel mults [16, 32, 64].
 
-    Designed to fit and train within ~3 min on a 1080 Ti GPU."""
+    Same architecture we used for DDPM in the 2025 edition of this
+    notebook — flow matching only changes the *loss* and *sampler*, not
+    the backbone."""
 
     def __init__(self, time_dim=64):
         super().__init__()
@@ -457,9 +463,12 @@ class TinyUNet(nn.Module):
         self.time_proj_up1 = nn.Linear(128, 16)
 
     def time_embedding(self, t):
+        """t is a continuous tensor in [0, 1] here (flow matching), not
+        an integer step index as it was in DDPM.  We rescale to keep the
+        sinusoidal frequencies in a useful range."""
         half = self.time_dim // 2
         freqs = torch.exp(-math.log(10000) * torch.arange(half, device=t.device) / half)
-        args = t[:, None].float() * freqs[None]
+        args = (t.float() * 1000.0)[:, None] * freqs[None]
         return torch.cat([args.sin(), args.cos()], dim=-1)
 
     def forward(self, x, t):
@@ -468,7 +477,7 @@ class TinyUNet(nn.Module):
         h1 = self.down1(h0)                                # (B, 32, 32, 32)
         h2 = self.down2(h1)                                # (B, 64, 16, 16)
         h_mid = self.mid(h2 + self.time_proj_mid(t_emb)[:, :, None, None])
-        u2 = self.up2(h_mid + self.time_proj_up2(t_emb)[:, :, None, None] * 0)
+        u2 = self.up2(h_mid)
         u2 = u2 + h1                                       # skip
         u1 = self.up1(u2 + self.time_proj_up2(t_emb)[:, :, None, None])
         u1 = u1 + h0
@@ -477,72 +486,87 @@ class TinyUNet(nn.Module):
 
 # %%
 if HAS_GPU:
-    print(f"GPU detected — training tiny DDPM ({T} steps, ~2-3 min on 1080Ti)")
+    print("GPU detected — training tiny flow-matching U-Net (~1-2 min on 1080Ti)")
     torch.manual_seed(0)
     unet = TinyUNet().to(DEVICE)
     opt = torch.optim.Adam(unet.parameters(), lr=2e-4)
-    loader_ddpm = DataLoader(TensorDataset(X_tr), batch_size=32, shuffle=True)
-    n_epochs_ddpm = 20
-    for ep in range(n_epochs_ddpm):
+    loader_fm = DataLoader(TensorDataset(X_tr), batch_size=32, shuffle=True)
+    n_epochs_fm = 20
+    for ep in range(n_epochs_fm):
         unet.train()
         losses = []
-        for (xb,) in loader_ddpm:
-            t = torch.randint(0, T, (xb.shape[0],), device=DEVICE)
-            x_t, eps = q_sample(xb, t)
-            eps_pred = unet(x_t, t)
-            loss = F.mse_loss(eps_pred, eps)
+        for (xb,) in loader_fm:
+            # Flow-matching loss: predict the straight-line velocity.
+            x1 = xb
+            x0 = torch.randn_like(x1)
+            t = torch.rand(x1.shape[0], device=DEVICE)
+            x_t = (1 - t).view(-1, 1, 1, 1) * x0 + t.view(-1, 1, 1, 1) * x1
+            u_star = x1 - x0                               # target velocity
+            u_pred = unet(x_t, t)
+            loss = F.mse_loss(u_pred, u_star)
             opt.zero_grad(); loss.backward(); opt.step()
             losses.append(loss.item())
-        if ep % 4 == 0 or ep == n_epochs_ddpm - 1:
-            print(f"  epoch {ep:2d}  noise-prediction MSE = {np.mean(losses):.4f}")
+        if ep % 4 == 0 or ep == n_epochs_fm - 1:
+            print(f"  epoch {ep:2d}  velocity-matching MSE = {np.mean(losses):.4f}")
 
-    # Sample 6 images from the trained reverse process.
+    # Sample with a 10-step Heun ODE solver (predictor + corrector).
     @torch.no_grad()
-    def ddpm_sample(unet, n=6):
+    def fm_sample_heun(unet, n=6, n_steps=10):
+        """Heun's method for x' = u_theta(x, t), t: 0 -> 1.
+
+        Each step does a predictor (Euler) and a corrector (average of
+        velocities at both ends).  10 steps is plenty for this small
+        model — that's the flow-matching efficiency story."""
         x = torch.randn(n, 1, 64, 64, device=DEVICE)
-        for t in reversed(range(T)):
-            t_tensor = torch.full((n,), t, device=DEVICE)
-            eps_pred = unet(x, t_tensor)
-            a_t = alphas[t]; a_bar_t = alpha_bars[t]
-            mean = (1 / torch.sqrt(a_t)) * (x - (betas[t] / torch.sqrt(1 - a_bar_t)) * eps_pred)
-            if t > 0:
-                noise = torch.randn_like(x)
-                sigma = torch.sqrt(betas[t])
-                x = mean + sigma * noise
-            else:
-                x = mean
+        ts = torch.linspace(0.0, 1.0, n_steps + 1, device=DEVICE)
+        for k in range(n_steps):
+            t_k = ts[k]; t_k1 = ts[k + 1]
+            dt = t_k1 - t_k
+            t_vec = torch.full((n,), float(t_k), device=DEVICE)
+            u_k = unet(x, t_vec)                           # predictor velocity
+            x_pred = x + dt * u_k                          # Euler step
+            t_vec1 = torch.full((n,), float(t_k1), device=DEVICE)
+            u_k1 = unet(x_pred, t_vec1)                    # corrector velocity
+            x = x + 0.5 * dt * (u_k + u_k1)                # Heun average
         return x.clamp(0, 1)
 
-    samples = ddpm_sample(unet, n=6)
+    samples = fm_sample_heun(unet, n=6, n_steps=10)
     fig, axes = plt.subplots(1, 6, figsize=(13, 2.5))
     for i in range(6):
         axes[i].imshow(samples[i, 0].cpu().numpy(), cmap="gray", vmin=0, vmax=1)
-        axes[i].axis("off"); axes[i].set_title(f"DDPM sample {i}", fontsize=9)
-    plt.suptitle("Samples from the trained DDPM reverse process")
+        axes[i].axis("off"); axes[i].set_title(f"FM sample {i}", fontsize=9)
+    plt.suptitle("Samples from the trained flow-matching ODE (10 Heun steps)")
     plt.tight_layout(); plt.show()
 else:
-    print("No GPU detected — skipping DDPM training.")
-    print("The forward-process visualisation above is the qualitative point.")
-    print("On a GPU machine, the next cell would train a tiny U-Net DDPM in ~2-3 min.")
+    print("No GPU detected — skipping flow-matching training.")
+    print("The interpolant visualisation above is the qualitative point.")
+    print("On a GPU machine, the next cell would train a tiny U-Net flow-matching")
+    print("model in ~1-2 min and sample in 10 ODE steps.")
+    unet = None                                            # used by Exercise 5
 
 
 # %% [markdown]
-# **Take-home from Block 4 (GPU branch).** The DDPM samples will be
-# rougher than the VAE samples — 200 timesteps and 20 epochs is *small*
-# for diffusion (real-world DDPMs use 1000+ timesteps and 100s of
-# epochs). The point of this block is the *recipe*, not the polish:
-# noise predictor + forward process + reverse loop = a generative model.
+# **Take-home from Block 4.** Flow matching reaches similar visual quality
+# to a tiny DDPM with **~10x fewer sampling steps** and a simpler loss
+# (MSE on a velocity, no noise schedule, no $\bar\alpha_t$ bookkeeping).
+# That's the 2026 default for new image generators.
 #
-# **DDPM vs VAE — when to pick which?**
+# **Flow matching vs VAE — when to pick which?**
 #
-# - DDPM produces sharper samples *with enough training* — no posterior
-#   collapse, no blurry-mean-of-modes artefact.
-# - DDPM is much slower at sampling (N forward passes per sample, where
-#   N = T or N steps with DDIM-style acceleration).
-# - VAE sampling is one decode call — fast — but blurrier.
+# - Flow matching produces sharper samples *with enough training* — no
+#   posterior collapse, no blurry-mean-of-modes artefact.
+# - Flow matching is slower at sampling than a VAE (10 ODE steps vs 1
+#   decode), but much faster than DDPM (which used hundreds of steps).
+# - VAE sampling is one decode call — fastest — but blurrier.
 # - **Conditional generation in a CVAE is one extra input** (Block 2);
-#   conditional generation in DDPM uses classifier guidance or
-#   classifier-free guidance, which is the next natural lecture topic.
+#   conditional generation in flow matching uses classifier-free guidance
+#   on the velocity field — the same idea as guided diffusion, applied
+#   to the ODE.
+#
+# **Where DDPM lives now.** As the SDE-based ancestor: the 2 lines of math
+# at the top of this block are the only DDPM you need today. Everything
+# downstream — score matching, classifier-free guidance, consistency
+# distillation — generalises naturally to the flow-matching ODE.
 
 # %% [markdown]
 # # Block 5 — Materials latent-space arithmetic (MG W11)
@@ -821,6 +845,80 @@ plt.tight_layout(); plt.show()
 # across prototypes, yes — and that means the latent-space arithmetic
 # generalises. If not, you've found a structural bias in the embedding
 # that any inverse-design pipeline built on it would inherit.
+
+# %% [markdown]
+# ## Exercise 5 (stretch, optional) — Consistency distillation
+#
+# **Setup.** The flow-matching teacher in Block 4 needs **10 ODE steps**
+# per sample (NFE = 10). A *consistency model* [@song_2023_consistency]
+# distils that teacher into a **one-step student** $f_\theta(x_t, t)$
+# that maps *any* point on the trajectory directly to a clean sample.
+# The student's training signal is *consistency along the trajectory*:
+# adjacent points $(x_{t_1}, t_1)$ and $(x_{t_2}, t_2)$ on the same flow
+# must map to the same output.
+#
+# **Loss.** For a pair of adjacent times $t_1 < t_2$ sampled from the
+# trajectory of the trained teacher,
+#
+# $$
+# \mathcal{L}_{\text{consistency}}
+# = \big\| f_\theta(x_{t_1}, t_1)
+#        - \mathrm{stop\_grad}\big(f_\theta(x_{t_2}, t_2)\big) \big\|^2.
+# $$
+#
+# The stop-gradient on the second term turns the *later* student call into
+# a fixed regression target, the way a target network is used in deep
+# RL. After training, set $t = 1$ at inference and sample in **one**
+# forward pass (NFE = 1).
+#
+# **Task.**
+#
+# 1. Reuse the trained flow-matching `unet` from Block 4 as the *teacher*.
+#    Build a `TinyUNet` student with the same architecture.
+# 2. For each batch:
+#    - sample $x_1$ from `X_tr`, $x_0 \sim \mathcal{N}(0, I)$, and two
+#      times $t_1 < t_2$ in $(0, 1)$;
+#    - form $x_{t_1}$ and $x_{t_2}$ on the *teacher trajectory* — either
+#      with the linear interpolant or, for a stronger signal, with a few
+#      Heun steps of the teacher between $t_1$ and $t_2$;
+#    - compute the consistency loss above and update the student.
+# 3. **Compare** the 1-step student vs the 10-step teacher on a fresh
+#    batch of `n=64` samples:
+#    - **visual** quality (a 4x4 grid of each);
+#    - **2-Wasserstein distance** between the empirical distribution of
+#      *mean-pixel intensities* (or any 1-D summary statistic) of the
+#      generated samples and of the data — use
+#      `scipy.stats.wasserstein_distance` on the 1-D summary;
+#    - **NFE** (function evaluations per sample): student = 1, teacher = 10.
+#
+# **Expected.** The 1-step student should reach *most* of the teacher's
+# quality at 10x lower NFE — modest visual degradation but big speed-up.
+# If the student's W₂ distance is dramatically worse than the teacher's,
+# you've reproduced the real-world finding that *one-step distillation is
+# easy at the start of training and hard at the end* (the trajectory is
+# straighter where flow matching predicts a near-constant velocity).
+#
+# **Skeleton.**
+#
+# ```python
+# if HAS_GPU and unet is not None:
+#     teacher = unet                                         # from Block 4
+#     for p in teacher.parameters(): p.requires_grad_(False)
+#     student = TinyUNet().to(DEVICE)
+#     opt_s = torch.optim.Adam(student.parameters(), lr=2e-4)
+#     loader_cm = DataLoader(TensorDataset(X_tr), batch_size=32, shuffle=True)
+#     for ep in range(8):
+#         for (xb,) in loader_cm:
+#             x1 = xb; x0 = torch.randn_like(x1)
+#             # two adjacent times t1 < t2
+#             ...
+#             # student outputs and stop-grad target
+#             ...
+#             loss = ((s1 - s2.detach()) ** 2).mean()
+#             opt_s.zero_grad(); loss.backward(); opt_s.step()
+# ```
+#
+# *(see MFML §"Consistency models"; [@song_2023_consistency])*
 
 # %% [markdown]
 # ---

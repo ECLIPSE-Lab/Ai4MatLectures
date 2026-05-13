@@ -412,6 +412,147 @@ plt.show()
 
 
 # %% [markdown]
+# # Part E — In-Context Tabular Prediction with TabPFN (optional, ~30 min)
+#
+# *MFML W7 fragment: "Watch for: **TabPFN**".*
+#
+# TabPFN [@hollmann_2025_tabpfn] is a 2025 Nature result: a transformer
+# *pre-trained* on millions of synthetic tabular tasks that performs
+# **zero-shot in-context** prediction on a new dataset. You hand it
+# `(X_train, y_train, X_test)` and it returns predictions in one forward
+# pass — no per-task gradient descent, no hyperparameter tuning. The claim
+# is that, on the small-tabular regime ($N \lesssim 10^4$, $D \lesssim 500$),
+# it matches or beats a carefully tuned gradient-boosted tree.
+#
+# We test that claim here on the *same* T=0 stress-strain split we used in
+# Part C, against `XGBRegressor` with sensible defaults. ML-PC Week 12 will
+# deploy the same model on a materials-descriptor benchmark.
+#
+# > **Heavy dependency.** This cell needs `pip install tabpfn`. The first
+# > call downloads a checkpoint of roughly **1 GB**. Skip Part E entirely
+# > if you do not want that on your disk — the rest of the notebook does
+# > not depend on it.
+
+# %%
+# requires: pip install tabpfn
+# (∼1 GB checkpoint download on first run; cached afterwards)
+import time
+
+import xgboost as xgb
+
+try:
+    from tabpfn import TabPFNRegressor
+    _TABPFN_OK = True
+except ImportError as e:
+    print(f"[Part E skipped] TabPFN not installed: {e}")
+    print("    Install with:  pip install tabpfn")
+    _TABPFN_OK = False
+
+# Reuse the *exact same* 80/20 split from Part C — TensileTestDataset(T=0),
+# 350 rows × 1 feature. Well inside TabPFN v2's sweet spot of
+# N ≤ 10 000 rows and D ≤ 500 features (here capped at N ≤ 1000, D ≤ 100
+# per the assignment instructions — already satisfied).
+assert len(X_tr) <= 1000 and X_tr.shape[1] <= 100, \
+    "Part E assumes the small-tabular regime; widen the cap if you change datasets."
+print(f"Reusing Part C split: N_train={len(X_tr)}   N_test={len(X_te)}   D={X_tr.shape[1]}")
+
+
+def bootstrap_rmse_ci(y_true, y_pred, n_boot=10, seed=0):
+    """Return (rmse, lo95, hi95) from a small (n=10) bootstrap on the residuals.
+
+    Ten resamples is a coarse interval — fine for a 30-min hands-on, not a
+    publication. Increase n_boot if you want a tighter CI.
+    """
+    rng_b = np.random.default_rng(seed)
+    rmses = []
+    N = len(y_true)
+    for _ in range(n_boot):
+        idx = rng_b.integers(0, N, size=N)
+        rmses.append(np.sqrt(mean_squared_error(y_true[idx], y_pred[idx])))
+    rmses = np.asarray(rmses)
+    return float(rmses.mean()), float(np.percentile(rmses, 2.5)), float(np.percentile(rmses, 97.5))
+
+
+# --- Baseline: XGBoost with sensible defaults (no tuning) -------------------
+xgb_model = xgb.XGBRegressor(n_estimators=200, max_depth=4, learning_rate=0.1,
+                             tree_method="hist", random_state=0, verbosity=0)
+t0 = time.perf_counter()
+xgb_model.fit(X_tr, y_tr)
+xgb_pred = xgb_model.predict(X_te)
+xgb_time = time.perf_counter() - t0
+xgb_rmse, xgb_lo, xgb_hi = bootstrap_rmse_ci(y_te, xgb_pred, n_boot=10, seed=0)
+
+# --- TabPFN: zero-shot, no tuning ------------------------------------------
+if _TABPFN_OK:
+    # Use the 1080Ti if available; TabPFN v2 falls back to CPU automatically.
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    tabpfn_model = TabPFNRegressor(device=device)
+    t0 = time.perf_counter()
+    tabpfn_model.fit(X_tr, y_tr)
+    tabpfn_pred = tabpfn_model.predict(X_te)
+    tabpfn_time = time.perf_counter() - t0
+    tabpfn_rmse, tabpfn_lo, tabpfn_hi = bootstrap_rmse_ci(
+        y_te, tabpfn_pred, n_boot=10, seed=0
+    )
+else:
+    tabpfn_rmse = tabpfn_lo = tabpfn_hi = tabpfn_time = float("nan")
+    device = "n/a"
+
+
+# %%
+# Three-column comparison table: model | test metric | inference time (s).
+print()
+print(f"Device: {device}")
+print(f"{'model':<10} | {'test RMSE [MPa] (95% CI, 10-boot)':<38} | {'fit+predict time [s]':>22}")
+print("-" * 78)
+print(f"{'XGBoost':<10} | {xgb_rmse:6.2f}  ({xgb_lo:6.2f}, {xgb_hi:6.2f})              | "
+      f"{xgb_time:22.3f}")
+if _TABPFN_OK:
+    print(f"{'TabPFN':<10} | {tabpfn_rmse:6.2f}  ({tabpfn_lo:6.2f}, {tabpfn_hi:6.2f})              | "
+          f"{tabpfn_time:22.3f}")
+else:
+    print(f"{'TabPFN':<10} | (skipped — install tabpfn to run)        | {'n/a':>22}")
+
+
+# %% [markdown]
+# **Read this table.**
+#
+# On this small-tabular regression task — 280 training rows, 1 feature,
+# no tuning on either side — **TabPFN typically matches or beats XGBoost
+# without a single hyperparameter being chosen by you**. That is the
+# headline of [@hollmann_2025_tabpfn]: the inductive bias for "tabular
+# prediction" has been *amortised* into the transformer's weights during
+# pre-training on millions of synthetic tasks, so each new dataset is just
+# in-context inference.
+#
+# **Costs that are not free:**
+#
+# - The model checkpoint is roughly **1 GB** on disk.
+# - **Inference per sample is markedly slower** than a fitted XGBoost
+#   (every prediction is a transformer forward pass over the full training
+#   set as context). For $N_\text{test} \lesssim 10^3$ this is a non-issue;
+#   for streaming or large test sets it matters.
+# - It is **bounded** to the small-tabular regime — quality degrades past
+#   $N \approx 10^4$ rows or $D \approx 500$ features, which is exactly the
+#   ceiling for which it was trained. Outside that box, return to XGBoost
+#   or a graph/CNN model as appropriate.
+#
+# ML-PC Week 12 will repeat this comparison on a materials-descriptor
+# benchmark (SOAP / MBTR features), where the regime is the same shape and
+# the same conclusion has been reported in the literature.
+
+# %% [markdown]
+# > ### Reflection
+# >
+# > In your own words, **why is TabPFN's "in-context" claim plausible?
+# > What would break it?**
+# >
+# > *(replace this text with 3–5 sentences. Consider: what does
+# > pre-training on millions of synthetic tabular tasks actually buy you?
+# > Under what kind of distribution shift would the amortised prior fail?)*
+
+
+# %% [markdown]
 # ## Hand-in checklist
 #
 # Bring (or have on screen) the following on Thursday:
@@ -420,10 +561,13 @@ plt.show()
 # 2. The CV-MSE-std-vs-K plot from Part B.
 # 3. The RF vs XGBoost MSE-vs-`n_estimators` figure from Part C.
 # 4. Your written reflection paragraph from Part D.
+# 5. *(optional)* The XGBoost-vs-TabPFN comparison table from Part E and
+#    your reflection answer.
 #
-# All four feed directly into Thursday's blocks: Part A scaffolds Block 3
-# (decomposing the across-temperature error), Part B underlies the
+# All four (five) feed directly into Thursday's blocks: Part A scaffolds
+# Block 3 (decomposing the across-temperature error), Part B underlies the
 # evaluation methodology in Blocks 2 and 5, Part C is the foundation for
 # Block 5 (tree ensembles vs MLP across temperatures) and Block 6
-# (XGBoost on SOAP descriptors), and Part D is what we will measure
-# against in Block 7 Exercise (i).
+# (XGBoost on SOAP descriptors), Part D is what we will measure against
+# in Block 7 Exercise (i), and Part E previews ML-PC Week 12's TabPFN
+# deployment on materials descriptors.

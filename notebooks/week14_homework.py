@@ -5,8 +5,9 @@
 # lectures' Week 14 content onto a single deployment-audit story.
 #
 # 1. **MFML Unit 14** — Explainability, limits, scientific trust. Why
-#    XAI; six levels of explainability; sensitivity analysis; SHAP /
-#    LIME / Integrated Gradients; OOD detection; counterfactuals.
+#    XAI; six levels of explainability; sensitivity analysis; SHAP and
+#    Integrated Gradients; mechanistic interpretability (sparse
+#    autoencoders); OOD detection; counterfactuals.
 # 2. **ML-PC Unit 14** — Integration, limits, and reflection. Why ML
 #    fails in real labs; explainability for experimental ML
 #    (CAMs / SHAP); when ML genuinely changes processing.
@@ -21,7 +22,8 @@
 # with Integrated Gradients, and ends with an out-of-distribution
 # detection check — does the model know when it is being asked to
 # classify something it has never seen? Thursday will then add SHAP,
-# LIME, counterfactuals, a symmetry audit, an autoencoder OOD
+# a sparse-autoencoder mechanistic-interpretability audit,
+# counterfactuals, a symmetry audit, an autoencoder OOD
 # detector, and a course retrospective.*
 #
 # **Time:** ~75 minutes.

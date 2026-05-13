@@ -5,8 +5,9 @@
 # lectures' Week 14 content onto one deployment-audit story:
 #
 # 1. **MFML Unit 14** — Explainability, limits, scientific trust.
-#    SHAP, LIME, counterfactuals, OOD detection, the six levels of
-#    explainability.
+#    SHAP, Integrated Gradients, counterfactuals, OOD detection, the
+#    six levels of explainability, and a first look at **mechanistic
+#    interpretability** (superposition, sparse autoencoders).
 # 2. **ML-PC Unit 14** — Integration, limits, reflection. Why ML
 #    fails in real labs; explainability for experimental ML;
 #    instrument drift and distribution shift in practice.
@@ -16,14 +17,17 @@
 #
 # **Red thread.** *A 95%-accurate model has 5% wrong predictions —
 # the only useful question is **which 5%**. Today we instrument the
-# tensile regression model from Week 8 with SHAP and LIME to learn
-# **why** each prediction is what it is, generate counterfactual
-# explanations for what would have to change to flip a decision, audit
-# the Ising classifier from Week 10 for symmetry equivariance the
-# physics demands, build an autoencoder-based OOD detector that beats
-# the homework's max-softmax baseline, and end with a retrospective
-# of the 14-week arc — every method on the same problem, with a
-# single chart that says when each one wins.*
+# tensile regression model from Week 8 with SHAP to learn **why**
+# each prediction is what it is, train a **sparse autoencoder on the
+# Ising-CNN's hidden activations** to ask **what concepts** the
+# network represents internally (mechanistic interpretability),
+# generate counterfactual explanations for what would have to change
+# to flip a decision, audit the Ising classifier from Week 10 for
+# symmetry equivariance the physics demands, build an
+# autoencoder-based OOD detector that beats the homework's
+# max-softmax baseline, and end with a retrospective of the 14-week
+# arc — every method on the same problem, with a single chart that
+# says when each one wins.*
 #
 # > **Pre-flight check.** This notebook **assumes** you have run
 # > `notebooks/week14_homework.py`. Block 1 picks up directly from
@@ -35,7 +39,7 @@
 # |------:|:---:|:------|
 # | 1 |  6 | Recap from homework |
 # | 2 | 14 | KernelSHAP from scratch on a tensile regression model |
-# | 3 | 12 | LIME from scratch — local linear surrogate around a query point |
+# | 3 | 12 | Sparse autoencoder on Ising-CNN activations — mechanistic interp. |
 # | 4 | 14 | Counterfactuals via gradient descent on the input |
 # | 5 | 12 | Symmetry audit on the Ising CNN; fix with test-time augmentation |
 # | 6 | 12 | Autoencoder reconstruction error as an OOD detector — beats MSP |
@@ -54,7 +58,6 @@ import matplotlib.pyplot as plt
 
 from sklearn.metrics import roc_auc_score
 from sklearn.preprocessing import StandardScaler
-from sklearn.linear_model import Ridge
 
 from ai4mat.datasets import IsingDataset, CahnHilliardDataset, TensileTestDataset
 
@@ -69,16 +72,22 @@ torch.manual_seed(0)
 class TinyCNN(nn.Module):
     def __init__(self, n_classes: int = 2):
         super().__init__()
-        self.net = nn.Sequential(
+        # Split into trunk + head so Block 3 can tap the penultimate
+        # 64-dim feature vector (post-pool, pre-classifier).
+        self.trunk = nn.Sequential(
             nn.Conv2d(1, 16, 3, padding=1), nn.GELU(),
             nn.Conv2d(16, 32, 3, padding=1), nn.GELU(),
             nn.Conv2d(32, 64, 3, padding=1), nn.GELU(),
             nn.AdaptiveAvgPool2d(1), nn.Flatten(),
-            nn.Linear(64, n_classes),
         )
+        self.head = nn.Linear(64, n_classes)
+
+    def features(self, x):
+        """Penultimate-layer activations (64-dim)."""
+        return self.trunk(x)
 
     def forward(self, x):
-        return self.net(x)
+        return self.head(self.trunk(x))
 
 
 def train_cnn(model, X, y, n_epochs=5, lr=3e-3, batch=128, val_frac=0.1, seed=0):
@@ -310,68 +319,166 @@ plt.show()
 
 
 # %% [markdown]
-# ## Block 3 — LIME: a local linear surrogate
+# ## Block 3 — Sparse autoencoder on Ising-CNN activations
 #
-# LIME (Ribeiro et al. 2016) takes a single query $x$, perturbs it
-# many times in input space, gets the model's predictions, and fits a
-# **local** weighted linear regression on the perturbed sample —
-# weighted by similarity to $x$ (Gaussian kernel). The linear model's
-# coefficients are LIME attributions. Compared to SHAP, LIME is faster
-# but only locally consistent (it explains *one* prediction, not the
-# decision boundary).
+# SHAP and Integrated Gradients answer **per-prediction** questions
+# ("which inputs mattered for *this* output?"). They are silent on a
+# different question that matters just as much for trust:
+# **what concept does a hidden layer of my network represent?**
+#
+# The naive answer — "inspect individual neurons" — fails because
+# neurons are *polysemantic*: a single hidden unit fires for several
+# unrelated patterns. This is not a bug; it is **superposition**
+# [@elhage_2022_superposition]. A network with $d$ neurons can pack
+# many more than $d$ near-orthogonal features into the same activation
+# space when those features are sparse — the cost is that each neuron
+# becomes a sum over multiple features.
+#
+# The fix is a **wide, sparse autoencoder (SAE)** trained on the
+# layer's activations [@templeton_2024_scaling]. The encoder projects
+# into a higher-dimensional space ($d' \gg d$) with an $\ell_1$
+# penalty on the post-ReLU code, which forces each input activation
+# to be reconstructed from a *small* subset of SAE features. The
+# top-activating inputs *per SAE feature* then tend toward
+# **monosemantic** concepts — one feature, one idea.
+#
+# This is exactly **the Unit-5 autoencoder with an $\ell_1$ activation
+# penalty**: same encoder/decoder skeleton, same reconstruction loss,
+# one extra term. We apply it to the penultimate (64-dim) layer of the
+# Ising CNN trained in Block 1.
 
 # %%
-def lime_explain(model_fn, x: np.ndarray, n_samples: int = 400,
-                 sigma: float = 0.5, seed: int = 0) -> np.ndarray:
-    rng = np.random.default_rng(seed)
-    n = len(x)
-    # Perturb x with isotropic Gaussian noise.
-    Xp = x + rng.normal(0, sigma, size=(n_samples, n))
-    yp = model_fn(Xp.astype(np.float32))
-    # Similarity weights: Gaussian kernel on distance from x.
-    dist2 = ((Xp - x) ** 2).sum(axis=1)
-    weights = np.exp(-dist2 / (2 * (n * sigma * sigma)))
-    # Weighted ridge regression.
-    sw = np.sqrt(weights)
-    A = (Xp - x) * sw[:, None]
-    b = (yp - model_fn(x.reshape(1, -1).astype(np.float32))[0]) * sw
-    ridge = Ridge(alpha=0.1, fit_intercept=False).fit(A, b)
-    return ridge.coef_
+# Cache penultimate-layer activations on a representative Ising batch.
+N_ACT = min(2000, len(ising))
+torch.manual_seed(0)
+act_idx = torch.randperm(len(ising))[:N_ACT]
+X_act = ising.X[act_idx]
+y_act = ising.y[act_idx]
 
-
-coef_lime = lime_explain(mlp_predict_np, x_query)
-coef_lime_phys = coef_lime * y_t_sd
-print(f"Block 3 — LIME local linear surrogate around the same query:")
-print(f"  per-feature local slope (MPa per std-feature):")
-for n, c in sorted(zip(feat_names, coef_lime_phys), key=lambda v: -abs(v[1])):
-    print(f"    {n:<10}: {c:>+8.2f}")
+cnn.eval()
+with torch.no_grad():
+    H = cnn.features(X_act)                          # (N, 64)
+d_act = H.shape[1]
+print(f"Block 3 — cached penultimate activations: {tuple(H.shape)} (d = {d_act})")
 
 
 # %%
-# Compare SHAP vs LIME magnitudes on the same query.
-fig, ax = plt.subplots(figsize=(8, 5))
-y_pos = np.arange(len(feat_names))
-w = 0.4
-ax.barh(y_pos - w / 2, phi_phys, height=w, label="SHAP", color="tab:blue")
-ax.barh(y_pos + w / 2, coef_lime_phys, height=w, label="LIME (local slope)",
-        color="tab:orange")
-ax.set_yticks(y_pos); ax.set_yticklabels(feat_names)
-ax.axvline(0, color="k", lw=0.5)
-ax.set_xlabel("attribution (MPa)")
-ax.set_title("Block 3 — SHAP vs LIME on the same query")
-ax.grid(alpha=0.3, axis="x"); ax.legend()
-plt.tight_layout()
-plt.show()
+class SparseAutoencoder(nn.Module):
+    """Wide, sparse autoencoder for mechanistic interpretability.
+
+    Encoder lifts d -> d' = 4d with ReLU; decoder maps d' -> d.
+    Loss = ||h - h_hat||^2 + lam * ||f||_1, where f is the post-ReLU
+    encoder code. The L1 penalty on the *activations* (not the
+    weights) is what drives monosemanticity.
+    """
+
+    def __init__(self, d: int, expansion: int = 4):
+        super().__init__()
+        d_prime = expansion * d
+        self.enc = nn.Linear(d, d_prime)
+        self.dec = nn.Linear(d_prime, d, bias=False)
+        # A small input bias subtracted before encoding helps centre
+        # activations (cf. Anthropic 2023 SAE recipe).
+        self.b_pre = nn.Parameter(torch.zeros(d))
+
+    def encode(self, h):
+        return F.relu(self.enc(h - self.b_pre))
+
+    def forward(self, h):
+        f = self.encode(h)
+        h_hat = self.dec(f) + self.b_pre
+        return h_hat, f
+
+
+torch.manual_seed(0)
+sae = SparseAutoencoder(d=d_act, expansion=4)
+opt_sae = torch.optim.Adam(sae.parameters(), lr=1e-3)
+LAM = 5e-3
+N_EPOCHS_SAE = 15
+BATCH_SAE = 256
+
+print(f"Block 3 — training SAE (d={d_act} -> d'={4*d_act}) for {N_EPOCHS_SAE} epochs, lambda = {LAM}")
+for ep in range(N_EPOCHS_SAE):
+    perm = torch.randperm(len(H))
+    ep_recon = ep_l1 = 0.0; n = 0
+    for i in range(0, len(H), BATCH_SAE):
+        hb = H[perm[i : i + BATCH_SAE]]
+        opt_sae.zero_grad()
+        h_hat, f = sae(hb)
+        recon = F.mse_loss(h_hat, hb)
+        l1 = f.abs().mean()
+        loss = recon + LAM * l1
+        loss.backward(); opt_sae.step()
+        ep_recon += recon.item() * len(hb); ep_l1 += l1.item() * len(hb); n += len(hb)
+    if ep == 0 or (ep + 1) % 5 == 0 or ep == N_EPOCHS_SAE - 1:
+        print(f"  epoch {ep+1:>2}: recon MSE {ep_recon/n:.4f}   mean |f| {ep_l1/n:.4f}")
+
+# Activation frequency per SAE feature.
+with torch.no_grad():
+    F_all = sae.encode(H)                            # (N, d')
+active = (F_all > 0).float().mean(0)                 # firing rate per feature
+print(f"  SAE features: {F_all.shape[1]} total, {(active > 0).sum().item()} ever active, "
+      f"{(active > 0.01).sum().item()} active on >1% of inputs")
+
+
+# %%
+# Top-K activating Ising images per feature, plotted as a grid.
+# Compare SAE features vs raw neurons of the penultimate layer.
+TOP_K = 5
+N_FEATS_SHOWN = 6
+
+# SAE features: pick the most "interesting" — high firing rate but not saturated.
+with torch.no_grad():
+    F_vals = sae.encode(H).numpy()                   # (N, d')
+sae_score = active.numpy() * (active.numpy() < 0.5).astype(float)
+sae_pick = np.argsort(-sae_score)[:N_FEATS_SHOWN]
+
+# Raw neurons: pick by variance (most "informative" axis-aligned units).
+H_np = H.numpy()
+raw_pick = np.argsort(-H_np.var(0))[:N_FEATS_SHOWN]
+
+
+def top_k_grid(values: np.ndarray, picks: np.ndarray, title: str):
+    """values: (N, n_feats). picks: indices into n_feats. Plot rows of TOP_K images."""
+    fig, axes = plt.subplots(N_FEATS_SHOWN, TOP_K, figsize=(2.0 * TOP_K, 2.0 * N_FEATS_SHOWN))
+    for row, idx in enumerate(picks):
+        scores = values[:, idx]
+        top = np.argsort(-scores)[:TOP_K]
+        for col, t in enumerate(top):
+            ax = axes[row, col]
+            ax.imshow(X_act[t, 0].numpy(), cmap="gray")
+            ax.set_xticks([]); ax.set_yticks([])
+            if col == 0:
+                ax.set_ylabel(f"feat {idx}\nlbl {int(y_act[t])}", fontsize=8)
+            ax.set_title(f"a={scores[t]:.2f}", fontsize=8)
+    fig.suptitle(title)
+    plt.tight_layout()
+    plt.show()
+
+
+top_k_grid(F_vals, sae_pick, "Block 3 — top-5 Ising images per SAE feature (tend toward one concept)")
+top_k_grid(H_np, raw_pick, "Block 3 — top-5 Ising images per raw CNN neuron (mixed concepts)")
 
 
 # %% [markdown]
-# Two perspectives on the same prediction usually agree on the
-# *signs* and the *biggest* contributors but can disagree in the
-# tail. SHAP is global-aware (the background distribution matters);
-# LIME is purely local (only the neighbourhood of $x$ matters). Pick
-# the one that matches the question you are asking — "what does my
-# model do here?" → LIME, "what part of $x$ deserves the credit
-# globally?" → SHAP.
+# Read the two grids together. Raw penultimate neurons fire for
+# **mixtures** of unrelated patterns — high values for both
+# above-Curie and below-Curie images, or for several distinct
+# textures. SAE features, in contrast, tend to concentrate on **one**
+# concept per feature (e.g. consistently above-Curie, or consistently
+# a particular domain morphology) — the post-ReLU $\ell_1$ penalty
+# forces the network to *spread* concepts across many features rather
+# than packing them into shared neurons.
+#
+# The penalty weight $\lambda$ tunes the trade-off: too small and
+# features stay polysemantic; too large and many features go *dead*
+# (never fire). The Anthropic *Scaling Monosemanticity* report
+# [@templeton_2024_scaling] applied this exact recipe at the scale of
+# a frontier LLM and recovered millions of monosemantic features.
+# **This is the Unit-5 autoencoder with $\ell_1$ on activations**, so
+# the connection to the rest of the course is one line of code —
+# every modelling primitive in this lecture is one we have already
+# built.
 
 
 # %% [markdown]
@@ -432,7 +539,7 @@ for n, d_phys, x0_phys, x1_phys in zip(
 
 
 # %% [markdown]
-# The counterfactual answers a different question than SHAP/LIME: not
+# The counterfactual answers a different question than SHAP/IG: not
 # *which features mattered*, but *what would have to be different*.
 # It is the natural form of explanation for an engineer looking at a
 # rejected prediction — "if the temperature had been X and the strain
@@ -721,9 +828,9 @@ plt.show()
 #    ensembles, GPs, calibration plots — pick whichever matches the
 #    cost-of-a-wrong-answer in your application.
 # 3. **Explainability is a deployment tool, not a research luxury.**
-#    SHAP / LIME / counterfactuals / IG / attention maps each answer
-#    a different question. Pick the question first, then pick the
-#    method.
+#    SHAP / Integrated Gradients / counterfactuals / sparse
+#    autoencoders / attention maps each answer a different question.
+#    Pick the question first, then pick the method.
 
 
 # %% [markdown]
@@ -816,8 +923,11 @@ plt.show()
 #    "active" vs "background" features, with the Shapley kernel weight.
 #    Satisfies efficiency: $\sum_i \varphi_i = f(x) - f(\text{bg})$.
 #    (Block 2.)
-# 4. **LIME** = perturb $x$, fit a *local* weighted linear surrogate.
-#    Faster than SHAP, only locally consistent. (Block 3.)
+# 4. **Sparse autoencoder (SAE)** on a hidden layer = wide encoder +
+#    $\ell_1$ penalty on its post-ReLU code. Lifts polysemantic neurons
+#    into monosemantic features. Direct application of
+#    **superposition** [@elhage_2022_superposition] and
+#    [@templeton_2024_scaling]. (Block 3.)
 # 5. **Counterfactual** = minimum perturbation to flip the prediction;
 #    the actionable form of XAI for a deployed model. (Block 4.)
 # 6. CNNs have **translation** equivariance built in but **not
@@ -831,8 +941,9 @@ plt.show()
 #    For deployment, pick a threshold by **cost-weighted** risk, not
 #    by AUROC. (Block 6, Exercise 4.)
 # 9. The right XAI method depends on the question. *Why this prediction?*
-#    → SHAP/LIME. *What would have to change?* → counterfactual.
-#    *Where in the input?* → IG/saliency. (All of today.)
+#    → SHAP. *Where in the input?* → IG/saliency. *What would have
+#    to change?* → counterfactual. *What concept does my hidden
+#    layer represent?* → sparse autoencoder. (All of today.)
 # 10. The 14-week arc: from data → loss → NN → optimisation →
 #     ensembles → probabilistic → representation learning → attention
 #     → generative → uncertainty → physics-informed → trust.

@@ -177,6 +177,118 @@ plt.tight_layout(); plt.show()
 # story from MFML §"Why the LR has to be conservative".
 
 # %% [markdown]
+# ## Part A.4 — Visualizing Lion's sign-of-gradient update
+#
+# The three optimizers above (SGD / momentum / Adam) are the *classic*
+# trio. Since Chen et al. 2023 [@chen_2023_lion] the modern alternative
+# **Lion** has gained adoption: instead of normalizing the update by a
+# running estimate of variance (Adam) or by adapting the step size in any
+# continuous way, Lion takes the **sign** of a momentum-smoothed gradient.
+# The update *magnitude is constant per axis* — only the sign changes.
+#
+# That sounds drastic, so let us see it on the classic ill-conditioned
+# quadratic
+#
+# $$
+# f(x, y) \;=\; \tfrac{1}{2}\,(x^2 + 100\,y^2).
+# $$
+#
+# The Hessian eigenvalues are 1 and 100; the loss is a long, narrow
+# valley. We start at $(x_0, y_0) = (-1, 1)$ and run 50 steps each of
+# **AdamW** (using `torch.optim`) and a **hand-rolled Lion** that we write
+# in five lines. We plot the trajectories side by side.
+
+# %%
+def lion_step(x, grad, lr, state, beta1=0.9, beta2=0.99):
+    """Lion: u = sign(beta1 * m + (1 - beta1) * grad); x <- x - lr * u.
+
+    The momentum buffer is updated AFTER the parameter step (Chen et al.
+    2023 convention). The point of this cell is that the *magnitude* of
+    the update along each axis is exactly `lr` — only the sign changes.
+    """
+    m = state.get("m", torch.zeros_like(x))
+    u = torch.sign(beta1 * m + (1.0 - beta1) * grad)
+    x_new = x - lr * u
+    m = beta2 * m + (1.0 - beta2) * grad
+    state["m"] = m
+    return x_new, state
+
+
+def ill_quad_grad(x):
+    return torch.tensor([x[0], 100.0 * x[1]])
+
+
+# %%
+# Run AdamW for 50 steps starting at (-1, 1).  We use torch.optim.AdamW on
+# a single leaf-tensor parameter so the trajectory is honest.
+torch.manual_seed(0)
+x0 = torch.tensor([-1.0, 1.0])
+
+p = torch.nn.Parameter(x0.clone())
+adamw = torch.optim.AdamW([p], lr=0.1, weight_decay=0.0)
+traj_adamw = [p.detach().clone()]
+for _ in range(50):
+    adamw.zero_grad()
+    loss = 0.5 * (p[0] ** 2 + 100.0 * p[1] ** 2)
+    loss.backward()
+    adamw.step()
+    traj_adamw.append(p.detach().clone())
+traj_adamw = torch.stack(traj_adamw)
+
+# Hand-rolled Lion from the same start; smaller LR because Lion's update
+# magnitude is constant (= lr) per axis.
+traj_lion = run_optimizer(x0, ill_quad_grad, lion_step, lr=0.05, n_iter=50)
+
+
+# %%
+# Side-by-side plot.
+xs = torch.linspace(-1.2, 1.2, 200)
+ys = torch.linspace(-1.2, 1.2, 200)
+XX, YY = torch.meshgrid(xs, ys, indexing="xy")
+Z = 0.5 * (XX ** 2 + 100.0 * YY ** 2)
+
+fig, (a1, a2) = plt.subplots(1, 2, figsize=(11, 4.4), sharey=True)
+for ax, traj, label, color in [
+    (a1, traj_adamw, "AdamW (lr=0.1)", "C0"),
+    (a2, traj_lion,  "Lion (lr=0.05)", "C2"),
+]:
+    ax.contour(XX, YY, Z, levels=np.logspace(-2, 1.7, 22),
+               cmap="Greys", linewidths=0.6)
+    ax.plot(traj[:, 0], traj[:, 1], "o-", color=color, lw=1.4, ms=3,
+            label=label, alpha=0.9)
+    ax.plot(traj[-1, 0], traj[-1, 1], "o", color=color, mec="k", ms=7)
+    ax.plot(0, 0, "k*", ms=12)
+    ax.set_xlabel("x"); ax.set_title(label)
+    ax.set_xlim(-1.2, 1.2); ax.set_ylim(-1.2, 1.2)
+    ax.set_aspect("equal")
+a1.set_ylabel("y")
+fig.suptitle("Part A.4 — AdamW vs Lion on f(x, y) = ½ (x² + 100 y²)")
+plt.tight_layout(); plt.show()
+
+
+# %% [markdown]
+# **Reading the side-by-side plot.** The AdamW trajectory is smooth — its
+# update magnitudes shrink continuously as the running variance estimates
+# climb along the steep ($y$) axis. The Lion trajectory is visibly
+# **staircased**: each step moves by exactly `lr` along the sign of the
+# (momentum-smoothed) gradient, so the optimizer makes large constant
+# strides early and then *cannot* shrink them when it gets close to the
+# minimum. That is the central trade-off Lion makes: by giving up the
+# variance estimate (saving one tensor of optimizer state per parameter),
+# it also gives up the ability to taper its step size.
+#
+# **Instructor note.** This is *why* Lion needs a smaller LR than AdamW
+# in practice — the update magnitude is `lr` per axis, not `lr` times a
+# small adaptive factor. The rule of thumb in the literature is 3-10×
+# smaller than the AdamW LR you would otherwise use. Show this plot
+# *before* the Block 5 bake-off in the Thursday lecture so the LR-grid
+# choice (Lion sweeps `{3e-4, 1e-3, 3e-3}` vs AdamW's `{3e-3, 1e-2, 3e-2}`)
+# is motivated rather than mysterious.
+#
+# Forward link: see the MFML W6 slide deck, **"Modern alternatives to
+# AdamW (2023–2024)"** — Lion, Sophia, Schedule-Free AdamW.
+
+# %% [markdown]
 # # Part B — LR schedules on a 2-conv CNN
 #
 # Now we put the optimizer choice inside a *real* training loop.  The model

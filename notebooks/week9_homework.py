@@ -25,7 +25,7 @@
 # | Part | Min | Topic | Lecture anchor |
 # |---|---:|---|---|
 # | A | 25 | Hand-rolled PCA on Ising-full; reconstruction error vs latent dim | MFML §"PCA as a linear AE", §"Reconstruction error vs latent dim" |
-# | B | 25 | t-SNE on the same data; the *distance trap*; optional UMAP | MFML §"t-SNE", §"What latent visualisations don't tell you" |
+# | B | 30 | t-SNE **and UMAP** on Ising-full latents; distance trap; n_neighbors sweep | MFML §"t-SNE", §"UMAP — the 2026 default" [@mcinnes_2018_umap] |
 # | C | 15 | Augmentation pipeline for contrastive learning — *no* training; data-prep only | MFML §"Positive pair construction", §"Augmentations as the prior" |
 # | D | 10 | Reflection: when does each method help? | bridge to Thursday Block 5 (probing) |
 #
@@ -34,7 +34,10 @@
 # 1. Part A: reconstruction-error-vs-k curve for k ∈ {1, 2, 4, 8, 16, 32}
 #    on Ising-full; printed table of MSE values.
 # 2. Part B: 2-D t-SNE plot of the Ising bottleneck features, with the
-#    "distance trap" pair annotated; pixel-vs-tSNE distance comparison.
+#    "distance trap" pair annotated; pixel-vs-tSNE distance comparison;
+#    2×2 grid of UMAP layouts at `n_neighbors ∈ {5, 15, 50, 200}` with
+#    runtimes; one-sentence verdict on which method preserves global
+#    structure better.
 # 3. Part C: pairwise pixel-distance histograms showing your `make_positive_pair`
 #    breaks pixel similarity while preserving class.
 # 4. Part D: paragraph (~5 sentences) on PCA vs t-SNE vs contrastive.
@@ -156,7 +159,7 @@ plt.tight_layout(); plt.show()
 # (Block 3) gives the *nonlinear* answer and usually finds a much smaller k.
 
 # %% [markdown]
-# # Part B — t-SNE and the distance trap
+# # Part B — t-SNE *and UMAP* on Ising-full latents
 #
 # t-SNE is the most popular nonlinear visualisation of high-D data. It
 # preserves *local* neighbourhood structure: two points that were near each
@@ -168,7 +171,16 @@ plt.tight_layout(); plt.show()
 # This is the **distance trap**: people read t-SNE plots as if pixel-space
 # distance equalled t-SNE distance. It does not.
 #
+# **UMAP** [@mcinnes_2018_umap] is the 2026 default for 2-D embeddings of
+# materials-science feature spaces. It is built on the same fuzzy-simplicial
+# foundation as t-SNE but trades the heavy KL-divergence optimisation for a
+# cross-entropy on a sparse k-NN graph: faster, scalable to millions of
+# points, and — most importantly for this exercise — it preserves more of
+# the **global** structure. After running both, you should be able to *see*
+# the difference.
+#
 # *(see MFML §"t-SNE — perplexity, t-distribution, and what it is for",
+# §"UMAP — the 2026 default for 2-D visualisation",
 # §"What latent visualisations don't tell you")*
 
 # %%
@@ -223,23 +235,90 @@ else:
     print("No clear distance-trap pair found — try perplexity or seed.")
 
 
+# %% [markdown]
+# ## UMAP — n_neighbors sweep, runtime, and side-by-side with t-SNE
+#
+# `umap-learn` is not in the default course env. Install it with
+# `pip install umap-learn` (wrapped in try/except like the TabPFN pattern
+# you saw in Week 7) and re-run this cell. If the import fails the cell
+# prints an install hint and skips — your hand-in is then just the t-SNE
+# half plus a note that you did not get UMAP running.
+#
+# **What we sweep.** `n_neighbors` is UMAP's single most consequential
+# hyperparameter. Small values (5) over-fragment the manifold and behave
+# like t-SNE; large values (200) push UMAP toward a global, almost
+# linear-looking layout. We measure runtime alongside the layout so you
+# can feel the cost-quality knob.
+
 # %%
-# Optional: UMAP if installed.  UMAP usually preserves *more* of the
-# global structure than t-SNE.  If you don't have it, skip — the in-class
-# exercise will use t-SNE only.
+import time
+
 try:
-    import umap
-    reducer = umap.UMAP(n_components=2, random_state=0, n_neighbors=15, min_dist=0.1)
-    Z_umap = reducer.fit_transform(Z50.numpy())
-    fig, ax = plt.subplots(figsize=(6, 4.5))
+    import umap  # noqa: F401  (the actual API is umap.UMAP)
+    HAVE_UMAP = True
+except ImportError:
+    HAVE_UMAP = False
+    print(
+        "umap-learn not installed — skipping the UMAP sweep.\n"
+        "  pip install umap-learn\n"
+        "and re-run this cell to complete Part B."
+    )
+
+if HAVE_UMAP:
+    import umap as umap_lib
+
+    nn_values = [5, 15, 50, 200]
+    umap_embeddings = {}
+    umap_runtimes = {}
+    for nn in nn_values:
+        reducer = umap_lib.UMAP(
+            n_components=2, n_neighbors=nn, min_dist=0.1, random_state=0,
+        )
+        t0 = time.time()
+        Z_u = reducer.fit_transform(Z50.numpy())
+        umap_runtimes[nn] = time.time() - t0
+        umap_embeddings[nn] = Z_u
+        print(f"  UMAP n_neighbors = {nn:3d}   runtime = {umap_runtimes[nn]:.2f} s")
+
+    # 2x2 grid of UMAPs + the t-SNE on a 5th panel (use a 2x3 layout, leave one blank).
+    fig, axes = plt.subplots(2, 3, figsize=(13.5, 8))
+    for ax, nn in zip(axes.flat[:4], nn_values):
+        Z_u = umap_embeddings[nn]
+        for cls in [0, 1]:
+            m = (y == cls).numpy()
+            ax.scatter(Z_u[m, 0], Z_u[m, 1], s=8, alpha=0.6,
+                       c=f"C{cls}", label=f"class {cls}")
+        ax.set_title(f"UMAP   n_neighbors = {nn}   ({umap_runtimes[nn]:.2f} s)")
+        ax.set_xlabel("UMAP 1"); ax.set_ylabel("UMAP 2")
+        ax.legend(fontsize=8)
+
+    # Panel 5: the t-SNE we already ran, for direct comparison.
+    ax = axes.flat[4]
     for cls in [0, 1]:
         m = (y == cls).numpy()
-        ax.scatter(Z_umap[m, 0], Z_umap[m, 1], s=8, alpha=0.6,
+        ax.scatter(Z_tsne[m, 0], Z_tsne[m, 1], s=8, alpha=0.6,
                    c=f"C{cls}", label=f"class {cls}")
-    ax.set_xlabel("UMAP 1"); ax.set_ylabel("UMAP 2"); ax.set_title("UMAP-2D (from PCA-50)")
-    ax.legend(); plt.tight_layout(); plt.show()
-except ImportError:
-    print("umap-learn not installed — skipping UMAP. (`pip install umap-learn` if you want it.)")
+    ax.set_title("t-SNE (perplexity = 30)   — comparison")
+    ax.set_xlabel("t-SNE 1"); ax.set_ylabel("t-SNE 2"); ax.legend(fontsize=8)
+
+    # Panel 6: blank.
+    axes.flat[5].axis("off")
+    plt.suptitle("Ising-full (PCA-50 features) — UMAP n_neighbors sweep vs t-SNE", y=1.02)
+    plt.tight_layout(); plt.show()
+
+
+# %% [markdown]
+# **Reflection question (write 1-2 sentences in your hand-in).** Across
+# the four UMAP panels and the t-SNE panel, **which method preserves the
+# *global* structure better** — i.e. which one keeps the two Ising
+# classes on a sensible relative scale rather than blowing them apart
+# into isolated islands? Note that at low `n_neighbors` UMAP behaves
+# closer to t-SNE; at high `n_neighbors` it pushes toward a more
+# PCA-like global layout.
+#
+# *(Answer for the marker: UMAP, especially at `n_neighbors ≥ 50`,
+# keeps inter-cluster distances meaningful. t-SNE's KL objective
+# explicitly exaggerates them. See [@mcinnes_2018_umap].)*
 
 
 # %% [markdown]

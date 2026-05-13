@@ -565,6 +565,176 @@ plt.show()
 
 
 # %% [markdown]
+# ## Block 4.5 — Conformalize the ensemble (CQR)
+#
+# Block 4's UQ knob is the GP posterior standard deviation, which gives a
+# *symmetric, homoscedastic-looking* interval whose width is the same
+# wherever predictive variance is the same. Real tensile-test residuals
+# are heteroscedastic — wider in the plastic regime than in the elastic
+# one — so a symmetric interval over-covers the easy regions and
+# under-covers the hard ones.
+#
+# **Conformalized Quantile Regression (CQR)** [@romano_2019_cqr] fixes this
+# in two steps:
+#
+# 1. **Quantile head.** Fit a small NN head with two outputs
+#    ($\hat{q}_{\alpha/2}$, $\hat{q}_{1-\alpha/2}$) on top of the GP-mean
+#    feature, trained with the **pinball loss**
+#    $L_\tau(y, \hat{y}) = \max(\tau(y - \hat{y}), (\tau - 1)(y - \hat{y}))$
+#    and total loss
+#    $\mathcal{L} = L_{\alpha/2}(y, \hat{q}_{\alpha/2})
+#                 + L_{1-\alpha/2}(y, \hat{q}_{1-\alpha/2}).$
+# 2. **Conformalize.** On a held-out calibration set, compute
+#    $s_i = \max\{\hat{q}_{\alpha/2}(x_i) - y_i,\;
+#                 y_i - \hat{q}_{1-\alpha/2}(x_i)\}$,
+#    take its $(1 - \alpha)$-quantile $\hat{Q}$, and emit
+#    $[\hat{q}_{\alpha/2}(x) - \hat{Q},\; \hat{q}_{1-\alpha/2}(x) + \hat{Q}]$.
+#
+# The result: an interval whose **width adapts** with the noise level
+# (wide in plastic regime, tight in elastic regime), with the same
+# finite-sample coverage guarantee as split conformal.
+#
+# *(see MFML §"Conformal prediction"; ML-PC §"CQR for materials regression")*
+
+# %%
+# Re-use the T=600 surrogate from Block 1 (gp_recap) as the mean
+# predictor. Carve a 60/20/20 split: GP train / quantile-head train +
+# conformal calibration / test, all disjoint.
+rng_cqr = np.random.default_rng(2026)
+perm_cqr = rng_cqr.permutation(len(X_T600))
+n_total = len(X_T600)
+n_tr_q   = int(0.60 * n_total)
+n_cal_q  = int(0.20 * n_total)
+tr_idx_q   = perm_cqr[:n_tr_q]
+cal_idx_q  = perm_cqr[n_tr_q:n_tr_q + n_cal_q]
+te_idx_q   = perm_cqr[n_tr_q + n_cal_q:]
+X_tr_q,  y_tr_q  = X_T600[tr_idx_q],  y_T600[tr_idx_q]
+X_cal_q, y_cal_q = X_T600[cal_idx_q], y_T600[cal_idx_q]
+X_te_q,  y_te_q  = X_T600[te_idx_q],  y_T600[te_idx_q]
+print(f"CQR split: GP-train={len(X_tr_q)}   q-head+conf={len(X_cal_q)}   test={len(X_te_q)}")
+
+# Refit GP on the CQR-train slice so the calib/test slices are unseen.
+gp_cqr = make_gp().fit(X_tr_q, y_tr_q)
+mu_cal_q,  _ = gp_cqr.predict(X_cal_q, return_std=True)
+mu_te_q,   _ = gp_cqr.predict(X_te_q,  return_std=True)
+
+
+# %%
+# Pinball-loss quantile head. Input = (strain, gp_mean) so the head can
+# learn a quantile *correction* around the GP mean.
+class QuantileHead(nn.Module):
+    def __init__(self, hidden=32):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(2, hidden), nn.ReLU(),
+            nn.Linear(hidden, hidden), nn.ReLU(),
+            nn.Linear(hidden, 2),       # [q_lo, q_hi]
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+
+def pinball_loss(y, yhat, tau):
+    diff = y - yhat
+    return torch.maximum(tau * diff, (tau - 1.0) * diff).mean()
+
+
+alpha_cqr = 0.1
+tau_lo, tau_hi = alpha_cqr / 2.0, 1.0 - alpha_cqr / 2.0
+
+# Stack features (strain, gp_mean) for the quantile head.
+feat_tr  = np.concatenate([X_tr_q,  gp_cqr.predict(X_tr_q).reshape(-1, 1)], axis=1)
+feat_cal = np.concatenate([X_cal_q, mu_cal_q.reshape(-1, 1)],                axis=1)
+feat_te  = np.concatenate([X_te_q,  mu_te_q.reshape(-1, 1)],                 axis=1)
+
+torch.manual_seed(0)
+qhead = QuantileHead(hidden=32)
+opt_q = torch.optim.Adam(qhead.parameters(), lr=1e-2)
+ft_tr_t = torch.tensor(feat_tr, dtype=torch.float32)
+y_tr_t  = torch.tensor(y_tr_q,  dtype=torch.float32)
+for _ in range(1500):
+    opt_q.zero_grad()
+    pred = qhead(ft_tr_t)
+    loss = pinball_loss(y_tr_t, pred[:, 0], tau_lo) + pinball_loss(y_tr_t, pred[:, 1], tau_hi)
+    loss.backward(); opt_q.step()
+print(f"final pinball loss (sum of tau_lo + tau_hi) = {loss.item():.3f}")
+
+with torch.no_grad():
+    q_cal = qhead(torch.tensor(feat_cal, dtype=torch.float32)).numpy()    # (n_cal, 2)
+    q_te  = qhead(torch.tensor(feat_te,  dtype=torch.float32)).numpy()
+
+
+# %%
+# Conformalize: nonconformity = max(q_lo - y, y - q_hi).
+nc_cal = np.maximum(q_cal[:, 0] - y_cal_q, y_cal_q - q_cal[:, 1])
+q_level = np.ceil((len(nc_cal) + 1) * (1 - alpha_cqr)) / len(nc_cal)
+q_level = min(q_level, 1.0)
+Q_hat = float(np.quantile(nc_cal, q_level))
+print(f"CQR conformal correction Q_hat = {Q_hat:.2f} MPa   q-level = {q_level:.4f}")
+
+lo_te = q_te[:, 0] - Q_hat
+hi_te = q_te[:, 1] + Q_hat
+covered = (y_te_q >= lo_te) & (y_te_q <= hi_te)
+emp_cov_cqr = float(covered.mean())
+mean_width = float(np.mean(hi_te - lo_te))
+print(f"CQR empirical coverage = {emp_cov_cqr:.3f}   (target = {1 - alpha_cqr:.2f})   "
+      f"mean width = {mean_width:.1f} MPa")
+
+
+# %%
+# Plot CQR intervals on the existing tensile axes from Block 4: the
+# adaptive width should be visibly wider in sparse/noisy regions.
+xs_plot = np.linspace(X_T600.min(), X_T600.max(), 300).reshape(-1, 1)
+mu_plot, _ = gp_cqr.predict(xs_plot, return_std=True)
+feat_plot = np.concatenate([xs_plot, mu_plot.reshape(-1, 1)], axis=1)
+with torch.no_grad():
+    q_plot = qhead(torch.tensor(feat_plot, dtype=torch.float32)).numpy()
+lo_plot = q_plot[:, 0] - Q_hat
+hi_plot = q_plot[:, 1] + Q_hat
+
+fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+
+ax = axes[0]
+ax.scatter(X_tr_q,  y_tr_q,  c="lightgray", s=10, alpha=0.5, label="GP train")
+ax.scatter(X_te_q,  y_te_q,  c="k",         s=14, alpha=0.7, label="test")
+ax.plot(xs_plot.ravel(), mu_plot, color="#1f77b4", lw=2, label="GP mean (Block 4)")
+ax.fill_between(xs_plot.ravel(), lo_plot, hi_plot, color="#d62728", alpha=0.25,
+                label=f"CQR 90% interval ($\\hat{{Q}}={Q_hat:.1f}$)")
+ax.set_xlabel("strain"); ax.set_ylabel("stress (MPa)")
+ax.set_title(f"CQR on TensileTestDataset(T=600), coverage = {emp_cov_cqr:.3f}")
+ax.legend(fontsize=9, loc="lower right")
+
+# Width vs strain — make adaptivity explicit.
+ax = axes[1]
+width_plot = hi_plot - lo_plot
+ax.plot(xs_plot.ravel(), width_plot, color="#d62728", lw=2, label="CQR width")
+ax.axhline(2 * 1.96 * np.median(gp_cqr.predict(xs_plot, return_std=True)[1]),
+           color="#1f77b4", ls="--", lw=1.5, label="GP 95% width (median)")
+ax.set_xlabel("strain"); ax.set_ylabel("interval width (MPa)")
+ax.set_title("Width adapts: wider where data is sparse / noisy")
+ax.legend(fontsize=9)
+plt.tight_layout()
+plt.show()
+
+
+# %% [markdown]
+# **Read these two panels.** Left: the CQR band hugs the tensile curve
+# tightly in the elastic regime and flares out in the plastic regime
+# where residual variance is genuinely larger — a behaviour the symmetric
+# $\mu \pm 1.96\sigma$ band from Block 4 cannot reproduce without
+# re-fitting a heteroscedastic GP. Right: the width-vs-strain plot makes
+# the adaptivity quantitative — CQR width varies by a factor of ~2 across
+# the support, while the GP's $1.96\sigma$ width is roughly flat.
+#
+# **Take-away.** CQR is the cheapest way to make an existing point
+# predictor *adaptive* without retraining the predictor itself. The
+# conformal step preserves the same distribution-free coverage guarantee
+# as plain split conformal, as long as exchangeability holds — Exercise 5
+# shows what breaks when it does not [@romano_2019_cqr].
+
+
+# %% [markdown]
 # # Block 5 — MG anchor: clustering vs discovery on `NanoindentationDataset`
 #
 # Discovery $\neq$ labeling. A *labeling* loop assigns one of K known
@@ -1086,6 +1256,81 @@ plt.show()
 #   gp_mf = make_gp(length_scale=[0.05, 1.0],
 #                   length_scale_bounds=(1e-3, 10)).fit(X_mf, y_mf)
 #   # Step 4: evaluate on a held-out clean T=600 set with fidelity_id=0.
+#   ...
+
+
+# %% [markdown]
+# ## Exercise 5 (stretch, optional) — Coverage under distribution shift
+#
+# Block 4.5's CQR construction gives a marginal-coverage guarantee
+# **only under exchangeability** of calibration and test
+# [@angelopoulos_2023_conformal]. Real materials labs routinely violate
+# this: you calibrate UQ at one temperature, deploy at another, and the
+# residual distribution shifts. This exercise shows the failure mode and
+# two simple fixes.
+#
+# **Your task:**
+#
+# 1. Train the Block 4.5 CQR pipeline (GP + quantile head + conformal
+#    correction $\hat{Q}$) **only on `TensileTestDataset(T=600)`** (warm
+#    conditions). Save the trained `qhead`, `Q_hat`, and `gp_cqr`.
+# 2. Evaluate empirical coverage of the resulting intervals on
+#    `TensileTestDataset(T=0)` (cold conditions). It should drop well
+#    below the 0.9 target — typically to 0.6 or lower — even though the
+#    nominal target was 0.9. **Exchangeability has failed.**
+# 3. **Quick fix.** Inflate $\hat{Q}$ by a heuristic factor (e.g. 2x)
+#    and re-measure coverage on T=0. Note the coverage / width trade-off.
+# 4. **Principled fix: adaptive conformal.** Implement the online update
+#    $\hat\alpha_t \leftarrow \hat\alpha_{t-1} + \gamma\,(\mathbf{1}[\text{miss}_t] - \alpha)$
+#    sweeping through the T=0 stream one sample at a time. After each
+#    step, recompute $\hat{Q}_t$ as the $(1 - \hat\alpha_t)$-quantile of
+#    the original calibration scores. Plot empirical coverage (cumulative
+#    or rolling-window) vs sample index. Show that the policy recovers
+#    to ~0.9 within a few hundred samples.
+#
+# *Hint: $\gamma = 0.01$ is a fine default; set $\hat\alpha_0 = \alpha$.
+# Clip $\hat\alpha_t$ to $(10^{-3}, 1 - 10^{-3})$ for stability.*
+
+# %%
+# TODO: your distribution-shift conformal experiment goes here.
+# Skeleton:
+#
+#   # Step 1: reuse `qhead`, `Q_hat`, `gp_cqr` from Block 4.5
+#   #          (all trained on T=600 only).
+#
+#   # Step 2: evaluate on T=0
+#   X_shift, y_shift = X_T0, y_T0
+#   mu_shift = gp_cqr.predict(X_shift)
+#   feat_shift = np.concatenate([X_shift, mu_shift.reshape(-1, 1)], axis=1)
+#   with torch.no_grad():
+#       q_shift = qhead(torch.tensor(feat_shift, dtype=torch.float32)).numpy()
+#   lo = q_shift[:, 0] - Q_hat
+#   hi = q_shift[:, 1] + Q_hat
+#   cov_shift = float(((y_shift >= lo) & (y_shift <= hi)).mean())
+#   print(f"T=0 coverage = {cov_shift:.3f}   (target 0.9)")
+#
+#   # Step 3: heuristic 2x inflation
+#   Q2 = 2.0 * Q_hat
+#   lo2 = q_shift[:, 0] - Q2
+#   hi2 = q_shift[:, 1] + Q2
+#   cov2 = float(((y_shift >= lo2) & (y_shift <= hi2)).mean())
+#
+#   # Step 4: adaptive conformal update
+#   gamma = 0.01
+#   alpha_t = alpha_cqr
+#   covers = []
+#   alpha_traj = []
+#   for t in range(len(X_shift)):
+#       qlvl = min(np.ceil((len(nc_cal) + 1) * (1 - alpha_t)) / len(nc_cal), 1.0)
+#       Q_t = float(np.quantile(nc_cal, qlvl))
+#       lo_t = q_shift[t, 0] - Q_t
+#       hi_t = q_shift[t, 1] + Q_t
+#       miss = float(not (lo_t <= y_shift[t] <= hi_t))
+#       covers.append(1 - miss)
+#       alpha_t = float(np.clip(alpha_t + gamma * (miss - alpha_cqr), 1e-3, 1 - 1e-3))
+#       alpha_traj.append(alpha_t)
+#
+#   # Plot rolling-window coverage vs sample index; mark the 0.9 target.
 #   ...
 
 

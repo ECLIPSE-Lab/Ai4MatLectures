@@ -348,3 +348,22 @@ plt.tight_layout(); plt.show()
 # 2. Reconstruction-vs-KL training curves at three β values (Part B).
 # 3. Latent-interpolation grid with energy annotations (Part C).
 # 4. β-VAE paragraph (Part D).
+#
+# **Look ahead — modern alternative to the VAE.** The VAE you just built
+# is the *historical* default for property-targeted generative models in
+# materials science. The **modern** default for new image generators is
+# **flow matching** [@lipman_2023_flow_matching]: an ODE-based generator
+# with a simpler loss (MSE on a straight-line velocity) and ~10x fewer
+# sampling steps than the DDPM diffusion models flow matching superseded.
+# Thursday's exercise notebook (`week11_generative_inverse_design.py`)
+# spends **Block 4** training a flow-matching model on the *same*
+# Cahn–Hilliard data you just used here, so you can compare:
+#
+# - VAE: 1 decode call, blurry, posterior-collapse risk;
+# - flow matching: 10 ODE steps, sharper, no posterior collapse.
+#
+# An optional **stretch Exercise 5** then *distils* the flow-matching
+# teacher into a one-step **consistency model** [@song_2023_consistency]
+# — same quality, single forward pass per sample. Worth a look if you've
+# enjoyed this homework and want to see where the field has moved
+# post-DDPM.

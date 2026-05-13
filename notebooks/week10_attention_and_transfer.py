@@ -43,6 +43,7 @@
 
 # %%
 # Standard imports.
+import time
 import numpy as np
 import torch
 import torch.nn as nn
@@ -366,6 +367,171 @@ plt.tight_layout(); plt.show()
 # Dosovitskiy 2020 (ViT) data-efficiency curve we discussed in MFML
 # Unit 10. With 5000 images we are nowhere near the ViT-favoured regime,
 # yet both work.
+
+
+# %% [markdown]
+# ### Block 3b — Naive MHA vs `F.scaled_dot_product_attention` (Flash SDPA)
+#
+# Our `MultiHeadSelfAttention` above is the textbook implementation: it
+# explicitly materialises the $T \times T$ attention matrix
+# $\mathrm{softmax}(QK^\top / \sqrt{d_k})$ before multiplying by $V$. That
+# matrix has $O(T^2)$ memory cost; at $T = 1024$ it dominates GPU memory.
+#
+# PyTorch's `F.scaled_dot_product_attention(q, k, v)` is a drop-in
+# replacement that *auto-dispatches* to one of three fused kernels:
+#
+# 1. **Flash Attention** [@dao_2022_flashattention] on Ampere or newer
+#    (sm_80+: A100, RTX 30/40 series, H100). True IO-aware, $O(T)$
+#    memory.
+# 2. **Memory-efficient attention** (xFormers-style) on older GPUs like
+#    Pascal (sm_60, GTX 10-series including the **1080 Ti** in our lab).
+#    Still tiled, still ~2-3x faster than naive MHA, but not the full
+#    Flash kernel.
+# 3. **Math** (a plain einsum fallback) on CPU or when the inputs do not
+#    fit any fused kernel's constraints.
+#
+# `nn.MultiheadAttention` *also* dispatches through SDPA under the hood
+# in modern PyTorch, but its public API still materialises a few extra
+# tensors (key padding masks, batch-first reshaping). The cleanest
+# comparison is **naive textbook MHA vs raw `F.scaled_dot_product_attention`**;
+# we add `nn.MultiheadAttention` as a third row for completeness.
+
+# %%
+class SDPABlock(nn.Module):
+    """Thin wrapper that calls F.scaled_dot_product_attention directly."""
+    def __init__(self, d_model: int, n_heads: int):
+        super().__init__()
+        assert d_model % n_heads == 0
+        self.n_heads = n_heads
+        self.d_head = d_model // n_heads
+        self.W_Q = nn.Linear(d_model, d_model, bias=False)
+        self.W_K = nn.Linear(d_model, d_model, bias=False)
+        self.W_V = nn.Linear(d_model, d_model, bias=False)
+        self.W_O = nn.Linear(d_model, d_model, bias=False)
+
+    def forward(self, X):
+        B, T, D = X.shape
+        H, dh = self.n_heads, self.d_head
+        Q = self.W_Q(X).view(B, T, H, dh).transpose(1, 2)   # (B, H, T, dh)
+        K = self.W_K(X).view(B, T, H, dh).transpose(1, 2)
+        V = self.W_V(X).view(B, T, H, dh).transpose(1, 2)
+        # F.scaled_dot_product_attention auto-dispatches to Flash / mem-efficient / math.
+        out = F.scaled_dot_product_attention(Q, K, V)        # (B, H, T, dh)
+        out = out.transpose(1, 2).contiguous().view(B, T, D)
+        return self.W_O(out)
+
+
+def bench_attention(module, B, T, D, device, n_warm=3, n_iter=10):
+    """Return (mean wall-clock seconds per fwd, peak GPU bytes)."""
+    module = module.to(device).eval()
+    x = torch.randn(B, T, D, device=device)
+    if device.type == "cuda":
+        torch.cuda.synchronize()
+        torch.cuda.reset_peak_memory_stats()
+    with torch.no_grad():
+        for _ in range(n_warm):
+            _ = module(x)
+        if device.type == "cuda":
+            torch.cuda.synchronize()
+        t0 = time.perf_counter()
+        for _ in range(n_iter):
+            _ = module(x)
+        if device.type == "cuda":
+            torch.cuda.synchronize()
+        t1 = time.perf_counter()
+    peak = torch.cuda.max_memory_allocated() if device.type == "cuda" else 0
+    return (t1 - t0) / n_iter, peak
+
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Block 3b — benchmarking attention kernels on device = {device}")
+if device.type == "cuda":
+    print(f"  GPU: {torch.cuda.get_device_name(0)}  (sm_{torch.cuda.get_device_capability(0)[0]}{torch.cuda.get_device_capability(0)[1]})")
+
+B_bench, H_bench, dh_bench = 8, 4, 64
+D_bench = H_bench * dh_bench                    # 256
+seq_lens = [64, 256, 1024]
+
+# Three modules to compare.
+naive = MultiHeadSelfAttention(D_bench, H_bench)
+sdpa = SDPABlock(D_bench, H_bench)
+mha_nn = nn.MultiheadAttention(D_bench, H_bench, bias=False, batch_first=True)
+
+
+class NNMHAWrapper(nn.Module):
+    """Wrap nn.MultiheadAttention so its call signature matches the others."""
+    def __init__(self, mod):
+        super().__init__()
+        self.mod = mod
+
+    def forward(self, x):
+        out, _ = self.mod(x, x, x, need_weights=False)
+        return out
+
+
+print(f"\n  seq_len |   naive MHA (time / peak)  |   nn.MultiheadAttention   |   F.SDPA (Flash/mem-eff)")
+print(f"  -------- + -------------------------- + -------------------------- + --------------------------")
+for T_bench in seq_lens:
+    t_naive, m_naive = bench_attention(naive, B_bench, T_bench, D_bench, device)
+    t_nn,    m_nn    = bench_attention(NNMHAWrapper(mha_nn), B_bench, T_bench, D_bench, device)
+    t_sdpa,  m_sdpa  = bench_attention(sdpa, B_bench, T_bench, D_bench, device)
+    fmt = lambda t, m: f"{t*1e3:6.2f} ms / {m/1024**2:6.1f} MB" if device.type == "cuda" else f"{t*1e3:6.2f} ms /     —  "
+    print(f"  {T_bench:>6}   |  {fmt(t_naive, m_naive):<24}  |  {fmt(t_nn, m_nn):<24}  |  {fmt(t_sdpa, m_sdpa):<24}")
+
+
+# %% [markdown]
+# **Reading the table.** Two things to notice.
+#
+# 1. **Wall-clock.** Naive MHA scales as $O(T^2)$ in both time and memory.
+#    SDPA's tiled kernel hides the $O(T^2)$ behind streaming
+#    multiprocessor blocks and shared memory — the wall-clock gap widens
+#    as $T$ grows. At $T = 1024$, expect roughly 2-3x speedup on the lab's
+#    1080 Ti and 5-10x on Ampere/Hopper.
+# 2. **Peak memory.** Naive MHA stores the full $B H T T$ attention
+#    matrix (at $T = 1024$, $B = 8$, $H = 4$ that is 128 MB of fp32).
+#    SDPA never materialises it; peak memory grows roughly linearly in
+#    $T$, not quadratically.
+#
+# **1080 Ti caveat (sm_61, Pascal).** Flash Attention v1/v2 require
+# sm_80+ (Ampere). On Pascal, `F.scaled_dot_product_attention` falls
+# back to the *memory-efficient* kernel — still tiled and substantially
+# faster than naive MHA, but it is **not** true Flash. The qualitative
+# story (sub-quadratic memory, faster wall-clock) holds; the absolute
+# speedup will be the 2-3x kind, not the 10x you read in papers benched
+# on A100s. The pedagogical point — *write SDPA, not hand-rolled MHA* —
+# is the same on either GPU.
+#
+# **What this means for the rest of the notebook.** Our `MultiHeadSelfAttention`
+# stays in place for *teaching* (you can read every line of it). In any
+# production model you would write `F.scaled_dot_product_attention(Q, K, V)`
+# instead and ship the same six-line wrapper as `SDPABlock` above.
+
+
+# %% [markdown]
+# ### Block 3c — Mixture of Experts: lecture concept, not exercised today
+#
+# MFML Unit 10 introduces **Mixture of Experts (MoE)** as the third
+# modern scaling trick alongside Flash Attention and state-space models.
+# The idea is simple to state and expensive to implement: replace the
+# dense MLP in each transformer block with a *router* that picks
+# $k \ll N$ of $N$ expert MLPs per token. You get the parameter count of
+# a 100-billion-parameter model with the FLOPs of a 10-billion-parameter
+# one, because only $k/N$ experts fire per token.
+#
+# **We do not implement MoE in this notebook.** A faithful MoE block
+# needs (a) a load-balancing auxiliary loss to stop the router from
+# collapsing onto one expert, (b) all-to-all expert dispatch primitives
+# for multi-GPU training, and (c) capacity-factor bookkeeping to handle
+# variable tokens-per-expert. That is one more lecture's worth of code
+# and well outside today's 90-minute budget.
+#
+# **Forward links if you want the production-scale story:**
+#
+# - PyTorch's `torch.distributed.tensor.parallel` for the all-to-all
+#   primitives.
+# - The **DeepSeek-MoE** paper (and the closely related Mixtral 8x7B,
+#   DBRX, and Qwen-MoE technical reports) for the routing and
+#   load-balancing recipes that actually ship.
 
 
 # %% [markdown]
@@ -759,6 +925,102 @@ print(f"  final val accuracy: {hist_1d['val_acc'][-1]:.3f}    (chance = 1/3 = 0.
 
 # %%
 # YOUR CODE for Exercise 4 below.
+
+
+# %% [markdown]
+# ## Exercise 5 (stretch, optional) — Tiny Mamba on tensile-curve regression
+#
+# Block 7 used a `Tiny1DTransformer` on tokenised tensile curves. Modern
+# alternatives to attention drop the $O(T^2)$ self-attention block in
+# favour of a **state-space model (SSM)** with $O(T)$ recurrence. The
+# best-known instance is **Mamba** [@gu_2023_mamba]: a selective SSM
+# whose state-transition matrix depends on the input, giving it the
+# *content-aware* gating of attention with the *linear-time* recurrence
+# of an RNN. On long sequences (DNA, audio, long context) Mamba matches
+# or beats Transformers at a fraction of the FLOPs.
+#
+# **Heavyweight dependency.** Mamba ships as a fused CUDA kernel:
+#
+# ```bash
+# pip install mamba-ssm causal-conv1d
+# ```
+#
+# **This will only install on a CUDA-equipped machine** with a working
+# nvcc toolchain. CPU-only builds will fail at `pip install` time — that
+# is expected. The `try/except` block below skips the exercise cleanly
+# in that case.
+#
+# **Your task:**
+#
+# 1. Replace the transformer backbone of Block 7 with a 1-2 layer Mamba
+#    block at the same `d_model = 16` and the same per-curve token
+#    budget. Keep the CLS-token readout (or switch to mean pooling —
+#    your call).
+# 2. Train for the same epoch budget as `Tiny1DTransformer` (8 epochs,
+#    same optimiser).
+# 3. Plot the two validation-accuracy curves side-by-side. Comment on
+#    parameter count, wall-clock per epoch, and final accuracy.
+# 4. At $T = 10$ tokens, do you expect Mamba's linear scaling to matter?
+#    Why or why not? (Hint: re-read the Block 3b table.)
+#
+# *Pedagogical pointer: SSMs are the most-credible non-attention sequence
+# model on the table as of 2026; the materials-informatics use case is
+# long sensor traces (full XRD line scans, full nano-indentation curves)
+# where $T \gg 10^3$ and the $O(T^2)$ attention bill bites hard.*
+
+# %%
+# YOUR CODE for Exercise 5 below. The reference implementation is
+# provided as a runnable scaffold — wrap the import in try/except so the
+# rest of the notebook keeps working without mamba-ssm installed.
+try:
+    from mamba_ssm import Mamba
+
+    class TinyMamba1D(nn.Module):
+        def __init__(self, T: int, in_dim: int = 1, d_model: int = 16,
+                     n_blocks: int = 2, n_classes: int = 3):
+            super().__init__()
+            self.embed = nn.Linear(in_dim, d_model, bias=False)
+            self.cls = nn.Parameter(torch.zeros(1, 1, d_model))
+            self.register_buffer("pe", sinusoidal_pe(T + 1, d_model).unsqueeze(0))
+            # Each Mamba block is a content-aware selective SSM.
+            self.blocks = nn.ModuleList([
+                Mamba(d_model=d_model, d_state=16, d_conv=4, expand=2)
+                for _ in range(n_blocks)
+            ])
+            self.ln_f = nn.LayerNorm(d_model)
+            self.head = nn.Linear(d_model, n_classes)
+            nn.init.trunc_normal_(self.cls, std=0.02)
+
+        def forward(self, x):
+            B = x.size(0)
+            toks = self.embed(x)
+            cls = self.cls.expand(B, -1, -1)
+            z = torch.cat([cls, toks], dim=1) + self.pe
+            for blk in self.blocks:
+                z = blk(z)
+            return self.head(self.ln_f(z[:, 0]))
+
+    if torch.cuda.is_available():
+        mamba_dev = torch.device("cuda")
+        m_mamba = TinyMamba1D(T=T_TENSILE).to(mamba_dev)
+        print(f"Exercise 5 — TinyMamba1D params: {count_params(m_mamba)}")
+        hist_mamba = train_classifier(
+            m_mamba, X_tens.to(mamba_dev), y_tens.to(mamba_dev),
+            n_epochs=8, lr=3e-3, batch=64,
+        )
+
+        fig, ax = plt.subplots(figsize=(7, 4.5))
+        ep_axis = np.arange(1, len(hist_1d["val_acc"]) + 1)
+        ax.plot(ep_axis, hist_1d["val_acc"], "o-", label=f"Tiny1DTransformer ({count_params(m1d)} params)")
+        ax.plot(ep_axis, hist_mamba["val_acc"], "s-", label=f"TinyMamba1D ({count_params(m_mamba)} params)")
+        ax.set_xlabel("epoch"); ax.set_ylabel("val accuracy")
+        ax.set_title("Exercise 5 — Transformer vs Mamba on tensile-curve classification")
+        ax.grid(alpha=0.3); ax.legend()
+        plt.tight_layout(); plt.show()
+    else:
+        print("Exercise 5 — skipping: mamba-ssm requires CUDA.")
+except ImportError as e:
+    print(f"Exercise 5 — mamba-ssm not installed ({e}); install with `pip install mamba-ssm causal-conv1d` on a CUDA machine.")
 
 
 # %% [markdown]
