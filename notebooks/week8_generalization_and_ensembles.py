@@ -13,7 +13,7 @@
 #    process monitoring" material is now in
 #    `ml_for_characterization_and_processing/unit07_time_series_supplementary/`
 #    — supplementary, not lectured.)*
-# 3. **MG Unit 7**: Local atomic environments and **SOAP descriptors**;
+# 3. **MG Unit 6**: Local atomic environments and **SOAP descriptors**;
 #    grouped CV by structure family. Structure-property anchor.
 #
 # **Red thread:** *Real materials models break when the distribution shifts
