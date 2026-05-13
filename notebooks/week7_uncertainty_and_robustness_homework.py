@@ -38,6 +38,7 @@
 # | C | 25 | Process-condition split: random vs leave-T-out on the 3-temperature dataset; quantify the leakage gap | ML-PC §"Generalisation to factory-floor data" + MG §"Why split design matters" |
 # | D | 10 | Reflection: when does Part B's U-curve agree with Part C's leakage gap, and when do they disagree? | bridge to Thursday |
 # | E | 15 | Distribution-free coverage: split-conformal recipe + empirical coverage check on `TensileTestDataset(T=600)` | MFML §"Conformal prediction" [@angelopoulos_2023_conformal] |
+# | **F** *(MG track)* | 45 | Crystals as graphs: PBC neighbour list → Gaussian-RBF edges → message passing by hand → optional pretrained MLIP | MG Unit 7 §§2–6, §7 (over-smoothing), §9 (case studies) |
 #
 # ## What you must hand in (or be able to show on Thursday)
 #
@@ -53,6 +54,10 @@
 # 5. **Part E:** the empirical conformal coverage printed for $\alpha = 0.1$
 #    on a fresh test split — it should land within sampling noise of the
 #    target $1 - \alpha = 0.9$.
+# 6. **Part F (MG track, optional for MLPC-only students):** the printed
+#    edge count + unique nearest-neighbour distance for FCC Cu, the RBF
+#    expansion plot, and the over-smoothing trajectory plot from manual
+#    message passing on the 3-atom toy graph.
 
 # %%
 # Standard imports for the whole homework. Same idiom as weeks 2-6.
@@ -490,3 +495,313 @@ plt.show()
 #
 # **Part E deliverable:** the printed empirical coverage and the diagnostic
 # scatter plot above.
+
+
+# %% [markdown]
+# ## Part F (MG track) — Crystals as graphs
+#
+# *Skip this if you are MLPC-only and the conformal block above already
+# took you over 75 min. MG-track students: this is the homework anchor
+# for MG Unit 7 (Graph-Based Representations).*
+#
+# **Red thread.** The descriptors you used in MG Unit 6 (Magpie, RDF,
+# SOAP) compress an entire crystal into a fixed-length vector. Graph
+# neural networks instead keep the atomistic structure as a *graph* —
+# atoms are nodes, neighbour relations are edges — and learn the
+# pooling step. This Part walks the three core mechanics:
+#
+# - **F.1** Build a periodic neighbour list (PBC discipline; MG U7 §§6–10).
+# - **F.2** Encode pair distances with a Gaussian-RBF basis (§11–12).
+# - **F.3** Run one round of message passing on a 3-atom toy and stack
+#   layers until features over-smooth (§16–18, §24).
+# - **F.4** Optional: forward-only inference with a pretrained universal
+#   MLIP (M3GNet) on the same Cu cell (§33 case studies). Requires
+#   `pip install matgl`.
+#
+# None of this needs a GPU. Blocks F.1–F.3 use `pymatgen` + raw PyTorch.
+
+# %% [markdown]
+# ### F.1 — Periodic neighbour list for FCC copper
+#
+# A crystal is *not* a finite point cloud: each unit-cell atom has
+# neighbours in adjacent images. Brute-force way to build the edges:
+# loop over a small range of integer lattice translations $(n_x, n_y,
+# n_z)$ and keep every pair whose minimum-image distance is below the
+# cutoff $r_{\text{cut}}$.
+#
+# Cu FCC primitive cell has **one** atom and twelve nearest neighbours
+# at $d = a / \sqrt{2}$. We expect exactly **12 edges** at
+# $r_{\text{cut}} = 3.0$ Å with $a_{\text{Cu}} = 3.61$ Å.
+
+# %%
+from pymatgen.core import Lattice, Structure
+
+A_CU = 3.61  # Angstrom; experimental Cu lattice parameter
+# Primitive FCC lattice vectors: face-diagonal basis.
+lat_cu = Lattice([[0.0,    A_CU / 2, A_CU / 2],
+                  [A_CU/2, 0.0,      A_CU / 2],
+                  [A_CU/2, A_CU / 2, 0.0]])
+cu = Structure(lat_cu, ["Cu"], [[0.0, 0.0, 0.0]])
+print(f"primitive volume = {cu.volume:.3f} Å³  (= a³/4 = {A_CU**3 / 4:.3f})")
+
+
+def periodic_neighbours(structure, r_cut: float, image_range: int = 2):
+    """Brute-force PBC neighbour list.
+
+    Returns
+    -------
+    src, dst : (E,) int arrays of node indices for each edge.
+    dist : (E,) float array of edge lengths in Å.
+    shift : (E, 3) int array of lattice-image translations applied to dst.
+
+    For each ordered pair (i, j) and each lattice translation
+    (n_x, n_y, n_z) in [-image_range, image_range]³, an edge is kept if
+    |r_j + n · L - r_i| ≤ r_cut.  The (i, j, (0,0,0)) self-edge is skipped.
+    """
+    cart = structure.cart_coords
+    L = np.array(structure.lattice.matrix)
+    N = len(cart)
+    src, dst, dists, shifts = [], [], [], []
+    for i in range(N):
+        for j in range(N):
+            for nx in range(-image_range, image_range + 1):
+                for ny in range(-image_range, image_range + 1):
+                    for nz in range(-image_range, image_range + 1):
+                        if i == j and (nx, ny, nz) == (0, 0, 0):
+                            continue
+                        shift = nx * L[0] + ny * L[1] + nz * L[2]
+                        d = float(np.linalg.norm(cart[j] + shift - cart[i]))
+                        if d <= r_cut:
+                            src.append(i); dst.append(j)
+                            dists.append(d); shifts.append((nx, ny, nz))
+    return (np.array(src, dtype=int),
+            np.array(dst, dtype=int),
+            np.array(dists, dtype=float),
+            np.array(shifts, dtype=int))
+
+
+src, dst, dist, shift = periodic_neighbours(cu, r_cut=3.0, image_range=2)
+print(f"edges within r_cut = 3.0 Å: {len(src)}   (expected 12 for FCC nn shell)")
+print(f"unique edge lengths: {sorted({round(d, 4) for d in dist})}")
+print(f"theoretical FCC nn distance a/√2 = {A_CU / np.sqrt(2):.4f} Å")
+
+# %% [markdown]
+# **What changes if you increase the cutoff.** Try $r_{\text{cut}} = 4.5$
+# Å — you should pick up the second nn shell at $d = a = 3.61$ Å (6
+# edges) and, depending on the cutoff, the third shell at $d = a
+# \sqrt{3/2} \approx 4.42$ Å.
+
+# %%
+for r in (2.6, 3.0, 3.7, 4.5):
+    s, _, dd, _ = periodic_neighbours(cu, r_cut=r, image_range=2)
+    shells = sorted({round(d, 3) for d in dd})
+    print(f"  r_cut = {r:.1f} Å  →  {len(s):3d} edges  shells: {shells}")
+
+# %% [markdown]
+# **Pitfall — image_range too small.** Setting `image_range=1` (only ±1
+# cell) silently misses long edges when $r_{\text{cut}}$ exceeds the
+# shortest lattice vector. Always set `image_range ≥ ceil(r_cut /
+# min_lattice_spacing)`. *This is the single most common bug in
+# student PBC implementations.*
+
+# %% [markdown]
+# ### F.2 — Encode distance on a Gaussian-RBF basis
+#
+# Atomistic networks treat each pair distance $d_{ij}$ as a *bag of
+# RBF features* — soft, smooth, differentiable. With $K$ centres
+# $\mu_k$ uniformly spaced in $[d_{\text{min}}, r_{\text{cut}}]$ and a
+# common width $\sigma$,
+#
+# $$ \phi_k(d) = \exp\!\bigl[-\tfrac{1}{2} ((d - \mu_k) / \sigma)^2\bigr]. $$
+#
+# The resulting `(E, K)` edge-feature matrix is what gets fed into the
+# message function in F.3.
+
+# %%
+def rbf_expand(dists, n_basis: int = 8, r_min: float = 0.5,
+               r_cut: float = 3.0, sigma: float = 0.3):
+    centres = np.linspace(r_min, r_cut, n_basis)
+    feat = np.exp(-0.5 * ((dists[:, None] - centres[None, :]) / sigma) ** 2)
+    return feat.astype(np.float32), centres
+
+
+edge_feat, centres = rbf_expand(dist, n_basis=8, r_min=0.5, r_cut=3.0, sigma=0.3)
+print(f"edge_feat shape: {edge_feat.shape}   (E={edge_feat.shape[0]}, K={edge_feat.shape[1]})")
+
+# %%
+# Visualise the basis: 8 Gaussians + a vertical line for the actual NN distance.
+fig, ax = plt.subplots(figsize=(7, 3.2))
+d_grid = np.linspace(0, 4, 400)
+for c in centres:
+    ax.plot(d_grid, np.exp(-0.5 * ((d_grid - c) / 0.3) ** 2),
+            color="#1f77b4", alpha=0.55, lw=1.4)
+ax.axvline(dist[0], color="k", linestyle="--", lw=1.2,
+           label=f"FCC Cu first edge: d = {dist[0]:.3f} Å")
+ax.set_xlabel("pair distance d (Å)")
+ax.set_ylabel("RBF activation")
+ax.set_title("Gaussian-RBF distance basis (K=8, σ=0.3)")
+ax.legend(loc="upper right", fontsize=9)
+plt.tight_layout()
+plt.show()
+
+# %% [markdown]
+# **Diagnostic.** The activation at the dashed line is the RBF feature
+# vector for one Cu–Cu edge. Two centres dominate; the rest are near
+# zero. That sparseness is what the linear layer in F.3 then mixes.
+
+# %% [markdown]
+# ### F.3 — One round of message passing, by hand
+#
+# To isolate the algorithm from the crystal we switch to a tiny open
+# chain (3 atoms, 4 directed edges) matching MG U7 slide 18. The
+# update rule we run is the GCN template with **degree-normalised
+# mean aggregation**
+#
+# $$ h_i^{(t+1)} = \mathrm{tanh}\Bigl(W_s\, h_i^{(t)} +
+# \tfrac{1}{|\mathcal{N}(i)|} \sum_{j \in \mathcal{N}(i)} W_n\,
+# h_j^{(t)}\Bigr) $$
+#
+# with $W_s, W_n \in \mathbb{R}^{4 \times 4}$, frozen-random weights,
+# `tanh` activation, and aggregation via `index_add_` + degree division.
+# Degree normalisation matters: without it, node 1 (degree 2) would
+# accumulate twice the signal of nodes 0 and 2 each round and the
+# trajectory diverges instead of smoothing. We stack **10 rounds** to
+# *see* over-smoothing — the inter-node spread collapses by an order of
+# magnitude (MG U7 §24).
+
+# %%
+import torch
+import torch.nn as nn
+
+torch.manual_seed(0)
+
+# 3-atom open chain: edges 0-1 and 1-2, both directions.
+edge_index = torch.tensor([[0, 1, 1, 2],   # src
+                           [1, 0, 2, 1]])  # dst
+
+# Frozen random initial node features and weight matrices.
+F = 4
+h0 = torch.randn(3, F)
+W_self = nn.Linear(F, F, bias=False)
+W_neigh = nn.Linear(F, F, bias=False)
+for p in (*W_self.parameters(), *W_neigh.parameters()):
+    p.requires_grad_(False)
+
+
+def gcn_round(h, edge_index):
+    """One GCN-style update with degree-normalised mean aggregation."""
+    src, dst = edge_index
+    messages = W_neigh(h[src])              # (E, F)
+    agg = torch.zeros_like(h)
+    agg.index_add_(0, dst, messages)        # sum messages per dst
+    deg = torch.zeros(h.shape[0])
+    deg.index_add_(0, dst, torch.ones(dst.shape[0]))   # degree per node
+    agg = agg / deg.clamp(min=1).unsqueeze(-1)         # mean aggregation
+    return torch.tanh(W_self(h) + agg)
+
+
+h_history = [h0.clone()]
+h = h0
+for _ in range(10):
+    h = gcn_round(h, edge_index)
+    h_history.append(h.detach().clone())
+
+# Stack to (rounds+1, N, F) for easy plotting.
+H = torch.stack(h_history).numpy()
+spread = H[:, :, 0].max(axis=1) - H[:, :, 0].min(axis=1)   # per-round spread of feature 0
+print(f"node-feature trajectory: shape {H.shape}   (rounds+1, N, F)")
+print(f"feature-0 initial spread: {spread[0]:.3f}  →  final spread: {spread[-1]:.4f}")
+print(f"~{spread[0] / max(spread[-1], 1e-9):.0f}× reduction over {H.shape[0] - 1} rounds")
+
+# %%
+# Two-panel plot: feature-0 trajectories + per-round spread on log y.
+fig, axes = plt.subplots(1, 2, figsize=(12, 3.8))
+colors = ["#1f77b4", "#ff7f0e", "#2ca02c"]
+
+ax = axes[0]
+for node in range(3):
+    ax.plot(range(H.shape[0]), H[:, node, 0], "-o",
+            color=colors[node], label=f"node {node}", lw=1.7, markersize=5)
+ax.set_xlabel("message-passing round")
+ax.set_ylabel(r"$h_i^{(t)}[0]$")
+ax.set_title("Per-node feature-0 trajectory")
+ax.legend(fontsize=9)
+ax.grid(alpha=0.25)
+
+ax = axes[1]
+ax.plot(range(H.shape[0]), spread, "-s", color="#444", lw=1.7, markersize=5)
+ax.set_xlabel("message-passing round")
+ax.set_ylabel("max(h[:,0]) − min(h[:,0])  [log]")
+ax.set_yscale("log")
+ax.set_title("Over-smoothing: per-round spread collapses")
+ax.grid(alpha=0.25, which="both")
+
+plt.tight_layout()
+plt.show()
+
+# %% [markdown]
+# **What you should observe.** The left panel shows the three node
+# trajectories crowding together with depth; the right panel is the
+# punchline — the spread of feature-0 across nodes drops roughly an
+# order of magnitude over 10 rounds (linear convergence rate set by
+# the spectral gap of the normalised propagation operator). In a
+# deeper GNN this is the *over-smoothing pathology*: stacking too
+# many message-passing layers makes all node features indistinguish-
+# able, which kills the model's ability to predict node-level
+# properties. Practical workarounds: residual / skip connections
+# (CGCNN), Jumping Knowledge Networks (Xu 2018), PairNorm /
+# DropEdge, or simply *don't stack more than 3–6 layers*. MG U7
+# slide 24 is the home of this discussion.
+
+# %% [markdown]
+# ### F.4 — (Stretch) Pretrained universal MLIP forward pass
+#
+# *Skip if you do not want to install another package.* Universal
+# machine-learning interatomic potentials (M3GNet, MACE-MP-0, CHGNet,
+# ORB, MatterSim) are GNNs pretrained on millions of DFT energies and
+# forces and are usable as a calculator on any crystal without further
+# training. We do **forward inference only** here — no training, no
+# fine-tuning. Install with:
+#
+# ```bash
+# pip install matgl
+# ```
+#
+# Then the snippet below runs in ~5 s on CPU.
+
+# %%
+try:
+    import matgl
+    from ase.build import bulk
+    from matgl.ext.ase import M3GNetCalculator
+
+    cu_atoms = bulk("Cu", "fcc", a=A_CU)
+    pot = matgl.load_model("M3GNet-MP-2021.2.8-DIRECT-PES")
+    cu_atoms.calc = M3GNetCalculator(potential=pot)
+    e_total = float(cu_atoms.get_potential_energy())
+    e_per_atom = e_total / len(cu_atoms)
+    print(f"M3GNet pretrained Cu primitive cell:")
+    print(f"  total energy  = {e_total:.4f} eV")
+    print(f"  per-atom      = {e_per_atom:.4f} eV/atom")
+    print(f"  DFT (PBE) ref ≈ -4.0 eV/atom for FCC Cu; M3GNet should land near it.")
+except Exception as exc:  # noqa: BLE001 — stretch goal, optional dep
+    print(f"F.4 skipped: {type(exc).__name__}: {exc}")
+    print("Install `matgl` with `pip install matgl` to run this block.")
+
+# %% [markdown]
+# **Part F deliverables.**
+#
+# - **F.1:** edge count `12` at `r_cut=3.0 Å` and the printed shell table
+#   for `r_cut ∈ {2.6, 3.0, 3.7, 4.5}` Å.
+# - **F.2:** the RBF-basis plot with the FCC nn distance overlay.
+# - **F.3:** the over-smoothing plot — feature-0 trajectories for the 3
+#   nodes over 5 rounds.
+# - **F.4 (optional):** the M3GNet per-atom energy for Cu, or the
+#   `matgl not installed` skip message.
+#
+# **Bring two questions to Thursday.** One conceptual question about
+# message passing (what's the role of `W_self` vs `W_neigh`?) and one
+# practical question about graph construction (when does a single
+# `r_cut` value break — which crystal classes need a chemistry-aware
+# cutoff like `CrystalNN`?). Pick whichever question kept you stuck
+# longest in F.1–F.3.
