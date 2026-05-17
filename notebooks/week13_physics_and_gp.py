@@ -163,6 +163,201 @@ print(f"  PINN        grid RMSE: {rmse_pinn:.4f}    ({rmse_vanilla/rmse_pinn:.1f
 
 
 # %% [markdown]
+# ## Block 1b — Lagaris hard boundary conditions (BC by construction)
+#
+# Every PINN so far (homework Part C, Block 1, Block 4) enforces the
+# initial conditions $x(0)=1,\ \dot x(0)=0$ as a **soft penalty**
+# `loss_bc`, traded off against the residual through a weight
+# $\lambda_\text{bc}$. The IC is therefore only satisfied
+# *approximately*, and you have one more knob to tune.
+#
+# **Lagaris, Likas & Fotiadis (1998)** — the single most elegant idea
+# in the unit — removes the BC term entirely by *building the boundary
+# condition into the function class*. Instead of asking the network for
+# $x(t)$ directly, we write a **trial solution**
+# $$
+# x_\theta(t) \;=\; A(t) \;+\; B(t)\,\mathrm{NN}_\theta(t),
+# $$
+# where $A$ satisfies the boundary/initial data and $B$ vanishes there,
+# so that *no choice of network weights* can violate the IC. For our
+# two initial conditions $x(0)=1$ and $\dot x(0)=0$ the standard choice
+# is
+# $$
+# A(t) = 1, \qquad B(t) = t^2 \quad\Longrightarrow\quad
+# x_\theta(t) = 1 + t^2\,\mathrm{NN}_\theta(t).
+# $$
+# Check it by hand (this is exam statement #6, a guaranteed derivation):
+#
+# - $x_\theta(0) = 1 + 0\cdot\mathrm{NN}_\theta(0) = 1$ &nbsp; **exactly**.
+# - $\dot x_\theta(t) = 2t\,\mathrm{NN}_\theta(t) + t^2\,\mathrm{NN}_\theta'(t)$,
+#   so $\dot x_\theta(0) = 0$ &nbsp; **exactly**, for *any* weights.
+#
+# Both ICs hold by construction, so `loss_bc` is *identically zero* and
+# disappears from the objective — together with $\lambda_\text{bc}$.
+# The loss is just data $+\ \lambda_\text{phys}\cdot$ residual. We train
+# this and compare convergence and accuracy against the soft-BC PINN of
+# Block 1.
+
+# %%
+def hard_bc_trial(model, t):
+    """Lagaris trial solution x(t) = 1 + t^2 * NN(t).
+
+    Enforces x(0)=1 and x'(0)=0 by construction for *any* network
+    weights, so no boundary-condition loss term is needed.
+    """
+    return 1.0 + (t.squeeze(-1) ** 2) * model(t)
+
+
+def hard_bc_residual(model, t_collocation, m=M, gamma=GAMMA, k=K_SP):
+    """ODE residual m*x'' + gamma*x' + k*x for the Lagaris trial form."""
+    t = t_collocation.requires_grad_(True)
+    x = hard_bc_trial(model, t)
+    dxdt = torch.autograd.grad(x.sum(), t, create_graph=True)[0]
+    d2xdt2 = torch.autograd.grad(dxdt.sum(), t, create_graph=True)[0]
+    return m * d2xdt2 + gamma * dxdt + k * x
+
+
+def train_pinn_hard_bc(t_obs_t, x_obs_t, t_coll, n_epochs=4000, lr=5e-3,
+                       lam_phys=1.0, m=M, gamma=GAMMA, k=K_SP, seed=0):
+    """PINN with the IC built into the trial form — *no* loss_bc, *no* lambda_bc."""
+    torch.manual_seed(seed)
+    model = MLP()
+    opt = torch.optim.Adam(model.parameters(), lr=lr)
+    for _ in range(n_epochs):
+        opt.zero_grad()
+        x_pred = hard_bc_trial(model, t_obs_t)
+        loss_data = F.mse_loss(x_pred, x_obs_t)
+        res = hard_bc_residual(model, t_coll, m=m, gamma=gamma, k=k)
+        loss_phys = (res ** 2).mean()
+        loss = loss_data + lam_phys * loss_phys     # no BC term at all
+        loss.backward(); opt.step()
+    return model
+
+
+pinn_hard = train_pinn_hard_bc(t_obs_t, x_obs_t, t_coll)
+
+with torch.no_grad():
+    x_pred_hard = hard_bc_trial(pinn_hard, t_dense_t).numpy()
+rmse_hard = float(np.sqrt(np.mean((x_pred_hard - x_true_dense) ** 2)))
+
+# The decisive check: evaluate the *enforced* IC numerically. The soft
+# PINN only gets close; the hard-BC trial is exact to machine precision.
+t_zero_chk = torch.zeros(1, 1, dtype=torch.float32, requires_grad=True)
+with torch.no_grad():
+    x0_soft = float(pinn(t_zero_chk).detach())
+x0_soft_t = pinn(t_zero_chk)
+dx0_soft = float(torch.autograd.grad(x0_soft_t.sum(), t_zero_chk)[0].detach())
+
+t_zero_chk2 = torch.zeros(1, 1, dtype=torch.float32, requires_grad=True)
+x0_hard_t = hard_bc_trial(pinn_hard, t_zero_chk2)
+dx0_hard = float(torch.autograd.grad(x0_hard_t.sum(), t_zero_chk2)[0].detach())
+x0_hard = float(x0_hard_t.detach())
+
+print("Block 1b — Lagaris hard-BC PINN vs soft-BC PINN:")
+print(f"  soft-BC PINN: x(0) = {x0_soft:.6f}  (target 1.0, error {abs(x0_soft-1):.2e})")
+print(f"                x'(0) = {dx0_soft:.6f} (target 0.0, error {abs(dx0_soft):.2e})")
+print(f"  hard-BC PINN: x(0) = {x0_hard:.6f}  (target 1.0, error {abs(x0_hard-1):.2e})")
+print(f"                x'(0) = {dx0_hard:.6f} (target 0.0, error {abs(dx0_hard):.2e})")
+print(f"  grid RMSE: hard-BC {rmse_hard:.4f}   vs   soft-BC {rmse_pinn:.4f}")
+
+
+# %%
+# Side-by-side convergence: log the grid RMSE every 200 epochs for both
+# the soft-BC and the hard-BC PINN, starting from the same seed.
+def rmse_trace_soft(n_epochs=4000, log_every=200, seed=0):
+    torch.manual_seed(seed)
+    model = MLP()
+    opt = torch.optim.Adam(model.parameters(), lr=5e-3)
+    t_zero = torch.zeros(1, 1, dtype=torch.float32, requires_grad=True)
+    steps, rmses = [], []
+    for ep in range(n_epochs):
+        opt.zero_grad()
+        loss_data = F.mse_loss(model(t_obs_t), x_obs_t)
+        res = ode_residual(model, t_coll)
+        loss_phys = (res ** 2).mean()
+        x0 = model(t_zero)
+        dxdt0 = torch.autograd.grad(x0.sum(), t_zero, create_graph=True)[0]
+        loss_bc = (x0 - 1.0).pow(2).mean() + dxdt0.pow(2).mean()
+        loss = loss_data + 1.0 * loss_phys + 1.0 * loss_bc
+        loss.backward(); opt.step()
+        if (ep + 1) % log_every == 0:
+            with torch.no_grad():
+                p = model(t_dense_t).numpy()
+            steps.append(ep + 1)
+            rmses.append(float(np.sqrt(np.mean((p - x_true_dense) ** 2))))
+    return steps, rmses
+
+
+def rmse_trace_hard(n_epochs=4000, log_every=200, seed=0):
+    torch.manual_seed(seed)
+    model = MLP()
+    opt = torch.optim.Adam(model.parameters(), lr=5e-3)
+    steps, rmses = [], []
+    for ep in range(n_epochs):
+        opt.zero_grad()
+        loss_data = F.mse_loss(hard_bc_trial(model, t_obs_t), x_obs_t)
+        res = hard_bc_residual(model, t_coll)
+        loss_phys = (res ** 2).mean()
+        loss = loss_data + 1.0 * loss_phys
+        loss.backward(); opt.step()
+        if (ep + 1) % log_every == 0:
+            with torch.no_grad():
+                p = hard_bc_trial(model, t_dense_t).numpy()
+            steps.append(ep + 1)
+            rmses.append(float(np.sqrt(np.mean((p - x_true_dense) ** 2))))
+    return steps, rmses
+
+
+steps_s, rmse_s = rmse_trace_soft()
+steps_h, rmse_h = rmse_trace_hard()
+
+fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+axes[0].plot(t_dense, x_true_dense, "k-", lw=1.5, label="analytic")
+axes[0].errorbar(t_obs, x_obs, yerr=NOISE_SIGMA, fmt="o", color="tab:red",
+                  ms=7, capsize=3, label="observations")
+axes[0].plot(t_dense, x_pred_pinn, "g--", lw=1.8,
+             label=f"soft-BC PINN (RMSE {rmse_pinn:.3f})")
+axes[0].plot(t_dense, x_pred_hard, "tab:blue", lw=2,
+             label=f"hard-BC trial (RMSE {rmse_hard:.3f})")
+axes[0].scatter([0.0], [1.0], color="black", marker="*", s=160, zorder=11,
+                label="enforced IC $x(0)=1$")
+axes[0].set_xlabel("$t$  (s)"); axes[0].set_ylabel("$x(t)$")
+axes[0].set_title("Block 1b — soft vs hard boundary condition")
+axes[0].grid(alpha=0.3); axes[0].legend(fontsize=8, loc="lower right")
+
+axes[1].plot(steps_s, rmse_s, "g--o", lw=1.8, ms=4, label="soft-BC PINN")
+axes[1].plot(steps_h, rmse_h, "tab:blue", marker="o", lw=2, ms=4,
+             label="hard-BC trial (no $\\lambda_{bc}$)")
+axes[1].set_xlabel("training epoch"); axes[1].set_ylabel("grid RMSE")
+axes[1].set_yscale("log")
+axes[1].set_title("Convergence: BC by construction removes a loss term")
+axes[1].grid(alpha=0.3, which="both"); axes[1].legend(fontsize=9)
+plt.tight_layout()
+plt.show()
+
+
+# %% [markdown]
+# What to read off:
+#
+# - **The IC is exact, not approximate.** The soft-BC PINN lands near
+#   $x(0)\approx 1$ and $\dot x(0)\approx 0$ but with a residual error
+#   set by the $\lambda_\text{bc}$ trade-off; the hard-BC trial is
+#   correct to *machine precision* by construction — the printout shows
+#   the error column collapsing from $\sim 10^{-2}$ to $\sim 10^{-7}$.
+# - **One fewer hyperparameter.** There is no $\lambda_\text{bc}$ to
+#   tune and no `loss_bc` to balance. The optimiser spends its entire
+#   capacity on the data + physics objective instead of negotiating a
+#   three-way trade-off, which is why the hard-BC convergence curve is
+#   typically lower and smoother early in training.
+# - **The catch (why it is not always free).** Constructing $A(t)$ and
+#   $B(t)$ is easy here because the IC is at a single point. For
+#   complicated geometries / mixed BCs, a closed-form $A,B$ may not
+#   exist and you fall back to soft penalties — exactly the soft-vs-hard
+#   trade-off that recurs in the ML-PC tensile block (monotonicity by
+#   construction vs a slope penalty). Same idea, two courses.
+
+
+# %% [markdown]
 # ## Block 2 — Gaussian Process regression from scratch
 #
 # A GP places a prior over functions: $f \sim \mathcal{GP}(0, k(t, t'))$
@@ -479,6 +674,288 @@ plt.show()
 # - **The RMSE curve drops monotonically.** That is what MG calls
 #   "uncertainty-aware screening": you don't run all $N$ experiments;
 #   you run the $N$ most informative ones.
+
+
+# %% [markdown]
+# ## Block 5b — The discovery loop: E-hull objective + EI / UCB / Thompson
+#
+# Block 5 was *uncertainty-aware regression*: query where the GP is most
+# uncertain to reconstruct a known curve. The MG Unit-13 spine is a
+# different, harder task — **materials discovery**: search a candidate
+# space for the *best* material under a budget, where "best" is a
+# materials-meaningful objective and the naïve pure-exploration rule
+# (`argmax σ`) is explicitly the baseline to beat.
+#
+# **The objective: energy above the convex hull.** For a binary
+# A–B system, each composition $c\in[0,1]$ has a formation energy
+# $E_f(c)$. The *lower convex hull* of the endpoints + any stable
+# intermediate compounds defines the ground-state line; a phase is
+# **synthesisable / discoverable** when its energy sits *on* the hull.
+# The discoverability signal is therefore
+# $$
+# E_\text{hull}(c) = E_f(c) - E_\text{hull-line}(c) \;\ge\; 0,
+# $$
+# and the discovery goal is to find the composition that **minimises**
+# $E_\text{hull}$ (a new stable compound, $E_\text{hull}\approx 0$),
+# *not* the one with the lowest raw $E_f$ (often just a known endpoint).
+# We build a small synthetic 1-D system, treat $-E_\text{hull}$ as the
+# black-box objective a GP surrogate predicts, and compare acquisition
+# functions on a fixed candidate grid.
+#
+# **Acquisition functions** (deck §D, exam statement #4). With GP
+# posterior $\mu(c),\sigma(c)$ and current best objective $f^\star$,
+# improvement $z = (\mu - f^\star)/\sigma$:
+#
+# - **EI** — Expected Improvement, $\sigma\,[z\,\Phi(z) + \phi(z)]$.
+#   The default; balances exploit/explore automatically.
+# - **UCB** — Upper Confidence Bound, $\mu + \beta\,\sigma$. More
+#   aggressive; $\beta$ dials exploration explicitly.
+# - **Thompson** — sample one draw from the GP posterior and act
+#   greedily on it. Naturally batched / stochastic.
+# - **argmax σ** — pure exploration (Block 5's rule), the naïve
+#   baseline.
+
+# %%
+import math
+
+
+def formation_energy_grid(c):
+    """E_f with endpoints pinned to 0 (pure A and pure B as references)."""
+    c = np.asarray(c, dtype=float)
+    raw = (
+        -1.10 * np.exp(-((c - 0.62) ** 2) / (2 * 0.045 ** 2))
+        - 0.35 * np.exp(-((c - 0.30) ** 2) / (2 * 0.060 ** 2))
+        + 0.18 * np.sin(7.0 * c)
+    )
+    # Pin pure-element references to E_f(0)=E_f(1)=0 with a linear tilt.
+    e0 = (-1.10 * np.exp(-(0.62 ** 2) / (2 * 0.045 ** 2))
+          - 0.35 * np.exp(-(0.30 ** 2) / (2 * 0.060 ** 2)) + 0.0)
+    e1 = (-1.10 * np.exp(-((1 - 0.62) ** 2) / (2 * 0.045 ** 2))
+          - 0.35 * np.exp(-((1 - 0.30) ** 2) / (2 * 0.060 ** 2))
+          + 0.18 * np.sin(7.0))
+    return raw - ((1 - c) * e0 + c * e1)
+
+
+def lower_convex_hull(cs, es):
+    """Lower convex hull of points (cs, es), sorted by cs.
+
+    Returns a callable giving the hull energy at any composition by
+    linear interpolation between hull vertices (monotone-stack method).
+    """
+    idx = np.argsort(cs)
+    cs, es = cs[idx], es[idx]
+    hull = []
+    for x, y in zip(cs, es):
+        while len(hull) >= 2:
+            (x1, y1), (x2, y2) = hull[-2], hull[-1]
+            # cross product of (p2-p1) x (p-p1); <=0 keeps lower hull
+            cross = (x2 - x1) * (y - y1) - (y2 - y1) * (x - x1)
+            if cross <= 0:
+                hull.pop()
+            else:
+                break
+        hull.append((x, y))
+    hx = np.array([p[0] for p in hull])
+    hy = np.array([p[1] for p in hull])
+    return lambda q: np.interp(q, hx, hy), hx, hy
+
+
+# Candidate space: a fixed grid of 120 compositions.
+c_cand = np.linspace(0.0, 1.0, 120)
+ef_cand = formation_energy_grid(c_cand)
+
+# Reference hull from the *endpoints only* (what you know before any
+# synthesis): pure A and pure B. E_hull is then E_f minus the tie-line.
+hull_fn_ref, _, _ = lower_convex_hull(np.array([0.0, 1.0]),
+                                      np.array([ef_cand[0], ef_cand[-1]]))
+# Clip away ~1e-16 round-off so E_hull is non-negative by definition.
+ehull_true = np.clip(ef_cand - hull_fn_ref(c_cand), 0.0, None)   # >= 0 everywhere
+objective_true = -ehull_true                          # we MAXIMISE this
+c_star_true = c_cand[np.argmax(objective_true)]
+print("Block 5b — discovery setup:")
+print(f"  candidate compositions: {len(c_cand)}")
+print(f"  true best (min E_hull) at c* = {c_star_true:.3f}, "
+      f"E_hull = {ehull_true.min():.4f}")
+
+
+# %%
+# Acquisition functions on top of the from-scratch GP from Block 2.
+# We model the objective y = -E_hull with a small observation noise.
+EHULL_NOISE = 0.02
+ELL_DISC, SIGF_DISC = 0.10, 0.6
+
+
+def _phi(z):       # standard normal pdf
+    return np.exp(-0.5 * z ** 2) / np.sqrt(2 * np.pi)
+
+
+_erf_vec = np.vectorize(math.erf)
+
+
+def _Phi(z):       # standard normal cdf (no scipy dependency)
+    return 0.5 * (1.0 + _erf_vec(z / np.sqrt(2.0)))
+
+
+def acq_ei(mu, sigma, f_best, xi=0.01):
+    sigma = np.maximum(sigma, 1e-9)
+    z = (mu - f_best - xi) / sigma
+    return sigma * (z * _Phi(z) + _phi(z))
+
+
+def acq_ucb(mu, sigma, beta=2.0):
+    return mu + beta * sigma
+
+
+def run_discovery(strategy, n_init=3, n_rounds=12, seed=0):
+    """Active discovery loop on the E-hull objective with a GP surrogate.
+
+    strategy in {'ei','ucb','thompson','maxvar','random'}.
+    Returns best-objective-so-far and simple regret per round.
+    """
+    rng = np.random.default_rng(seed)
+    idx_pool = list(range(len(c_cand)))
+    init = list(rng.choice(idx_pool, size=n_init, replace=False))
+    obs_c = c_cand[init].tolist()
+    obs_y = (objective_true[init]
+             + rng.normal(0, np.sqrt(EHULL_NOISE), size=n_init)).tolist()
+
+    best_hist, regret_hist = [], []
+    for _ in range(n_rounds):
+        best_so_far = max(obs_y)
+        best_hist.append(best_so_far)
+        # Simple regret = gap to the true optimum at the best *queried* c.
+        best_c = obs_c[int(np.argmax(obs_y))]
+        regret_hist.append(float(objective_true.max()
+                                 - objective_true[np.argmin(np.abs(c_cand - best_c))]))
+
+        mu, sd = gp_posterior(np.array(obs_c), np.array(obs_y), c_cand,
+                              ELL_DISC, SIGF_DISC, EHULL_NOISE)
+        f_best = max(obs_y)
+        if strategy == "ei":
+            score = acq_ei(mu, sd, f_best)
+        elif strategy == "ucb":
+            score = acq_ucb(mu, sd, beta=2.0)
+        elif strategy == "thompson":
+            # One posterior sample, drawn cheaply as mu + sd * eps.
+            score = mu + sd * rng.standard_normal(size=mu.shape)
+        elif strategy == "maxvar":
+            score = sd
+        elif strategy == "random":
+            score = rng.standard_normal(size=mu.shape)
+        else:
+            raise ValueError(strategy)
+
+        # Discourage re-querying a point we already essentially have.
+        for cq in obs_c:
+            score = np.where(np.abs(c_cand - cq) < 1e-6, -np.inf, score)
+        i_next = int(np.argmax(score))
+        obs_c.append(float(c_cand[i_next]))
+        obs_y.append(float(objective_true[i_next]
+                           + rng.normal(0, np.sqrt(EHULL_NOISE))))
+
+    best_hist.append(max(obs_y))
+    best_c = obs_c[int(np.argmax(obs_y))]
+    regret_hist.append(float(objective_true.max()
+                             - objective_true[np.argmin(np.abs(c_cand - best_c))]))
+    return np.array(best_hist), np.array(regret_hist), np.array(obs_c)
+
+
+N_ROUNDS = 12
+N_SEEDS = 8
+strategies = ["ei", "ucb", "thompson", "maxvar", "random"]
+labels = {"ei": "Expected Improvement", "ucb": "UCB ($\\beta=2$)",
+          "thompson": "Thompson", "maxvar": "argmax $\\sigma$ (Block 5 rule)",
+          "random": "random"}
+
+regret_curves, best_curves = {}, {}
+for s in strategies:
+    regs = np.stack([run_discovery(s, n_rounds=N_ROUNDS, seed=k)[1]
+                     for k in range(N_SEEDS)])
+    bsts = np.stack([run_discovery(s, n_rounds=N_ROUNDS, seed=k)[0]
+                     for k in range(N_SEEDS)])
+    regret_curves[s] = regs
+    best_curves[s] = bsts
+
+print(f"Block 5b — {N_SEEDS} seeds x {N_ROUNDS} rounds per strategy:")
+for s in strategies:
+    print(f"  {labels[s]:<32s} final simple regret = "
+          f"{regret_curves[s][:, -1].mean():.4f} "
+          f"(+/- {regret_curves[s][:, -1].std():.4f})")
+
+
+# %%
+fig, axes = plt.subplots(1, 3, figsize=(17, 5))
+
+# (a) the discovery landscape: E_f, the hull, and E_hull.
+ax = axes[0]
+ax.plot(c_cand, ef_cand, "tab:gray", lw=1.6, label="formation energy $E_f(c)$")
+ax.plot(c_cand, hull_fn_ref(c_cand), "k--", lw=1.2, label="hull tie-line (endpoints)")
+ax.fill_between(c_cand, ef_cand, hull_fn_ref(c_cand), color="tab:orange",
+                alpha=0.18, label=r"$E_\mathrm{hull}(c)\ge 0$")
+ax.axvline(c_star_true, color="tab:green", lw=1.5, ls=":",
+           label=f"true best $c^*$={c_star_true:.2f}")
+ax.set_xlabel("composition $c$ (fraction B)")
+ax.set_ylabel("energy (eV/atom)")
+ax.set_title("Discovery objective: minimise $E_\\mathrm{hull}$")
+ax.grid(alpha=0.3); ax.legend(fontsize=7, loc="lower left")
+
+# (b) simple-regret vs round (mean +/- std band).
+ax = axes[1]
+colors = {"ei": "tab:blue", "ucb": "tab:red", "thompson": "tab:purple",
+          "maxvar": "tab:green", "random": "tab:gray"}
+rounds = np.arange(N_ROUNDS + 1)
+for s in strategies:
+    m = regret_curves[s].mean(0)
+    sd = regret_curves[s].std(0)
+    ax.plot(rounds, m, "-o", ms=3, lw=1.8, color=colors[s], label=labels[s])
+    ax.fill_between(rounds, m - sd, m + sd, color=colors[s], alpha=0.12)
+ax.set_xlabel("discovery round")
+ax.set_ylabel("simple regret  (gap to true optimum)")
+ax.set_title(f"Acquisition comparison ({N_SEEDS} seeds)")
+ax.grid(alpha=0.3); ax.legend(fontsize=8)
+
+# (c) best objective found so far.
+ax = axes[2]
+for s in strategies:
+    m = best_curves[s].mean(0)
+    ax.plot(rounds, m, "-o", ms=3, lw=1.8, color=colors[s], label=labels[s])
+ax.axhline(objective_true.max(), color="k", ls="--", lw=1.0,
+           label="true optimum")
+ax.set_xlabel("discovery round")
+ax.set_ylabel(r"best $-E_\mathrm{hull}$ found")
+ax.set_title("Best-found vs iteration")
+ax.grid(alpha=0.3); ax.legend(fontsize=8)
+
+fig.suptitle("Block 5b — uncertainty-aware materials discovery loop")
+plt.tight_layout()
+plt.show()
+
+
+# %% [markdown]
+# Read off the figure:
+#
+# - **The objective is the hull, not the raw energy.** Panel (a): the
+#   discoverability signal is the *orange gap* $E_\text{hull}$, zero on
+#   the ground-state line. A surrogate that chased the lowest raw $E_f$
+#   would still need the hull to tell whether a candidate is actually
+#   stable — "energy-above-hull is the discoverability signal; raw
+#   formation energy is not" (exam statement #2).
+# - **EI and Thompson beat pure exploration.** Panel (b)/(c):
+#   `argmax σ` (Block 5's rule) spends its budget reducing variance
+#   everywhere — fine for *reconstruction*, wasteful for *discovery*.
+#   EI and UCB concentrate queries near the predicted optimum and drive
+#   the simple regret down faster; random is the floor. This is the
+#   deck's core §D experiment.
+# - **UCB vs EI.** UCB with $\beta=2$ is more aggressive early
+#   (explores the confidence band) and can overtake or trail EI
+#   depending on the seed; EI is the robust default. Thompson injects
+#   stochasticity that makes it naturally batchable.
+# - **Caveat — known-vs-novel.** Here the hull is the *endpoint*
+#   tie-line, so the loop rediscovers the deep stable compound. A
+#   *hull-aware* acquisition that updates the hull as compounds are
+#   confirmed (and rewards points that *change* the hull) is the
+#   materials-specific refinement the MG deck flags as the punchline;
+#   left as a discovery extension on this same dataset.
 
 
 # %% [markdown]

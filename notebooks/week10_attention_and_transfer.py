@@ -7,10 +7,14 @@
 #    multi-head attention from the homework into a tiny ViT (positional
 #    encoding + transformer blocks + classification head) and compare it
 #    against a CNN baseline of the same parameter budget.
-# 2. **MG Week 10** — Representation learning and feature discovery. We
-#    freeze the ViT trained on Ising, transfer its embedding to a
-#    Cahn-Hilliard regression task, and shoot it out against PCA and
-#    raw-pixel features.
+# 2. **MG Unit 9** — Neural Networks for Materials Properties. We build
+#    a graph neural network *on atomic systems*: a SchNet-style
+#    continuous-filter convolution and a CGCNN-style gated message-passing
+#    layer on crystal graphs, predicting formation energy. We make the
+#    four symmetries (translation, rotation, permutation, periodicity)
+#    concrete, contrast extensive (sum) vs intensive (mean) pooling, beat
+#    a composition-only Magpie+MLP baseline, and finish with the §43
+#    pretrain → freeze → fine-tune foundation-model recipe.
 # 3. **ML-PC parallel-track this week.** Unit 9b (Transformers for
 #    Materials) is a companion deck within W9 and pairs naturally with
 #    this notebook. ML-PC Unit 10 (Automation in microscopy) is the
@@ -19,13 +23,16 @@
 #    attention on tensile curves treated as 1D sequences — the
 #    spectral-compression analogue.
 #
-# **Red thread.** *Self-attention does not care whether its tokens are
-# image patches, spectral channels, or atoms in a crystal — the same
-# $\mathrm{softmax}(QK^\top/\sqrt{d_k})V$ operation builds a representation
-# from any sequence of tokens. Today we build a tiny ViT, watch it learn
-# attention maps that beat or tie a parameter-matched CNN, transfer
-# the ViT-Ising embedding to a regression task on Cahn-Hilliard, and
-# finish by running the same architecture on 1D tensile-curve sequences.*
+# **Red thread.** *A neural network's job is to respect the structure of
+# its input. For an image, attention must be told position matters (a
+# bug fixed by positional encoding). For an unordered set of atoms in a
+# crystal, permutation-invariant aggregation is exactly the **correct**
+# symmetry — which is why GNN message passing sums/means over neighbours.
+# Today we build a tiny ViT, watch its attention beat or tie a
+# parameter-matched CNN, then build a real crystal-graph GNN whose
+# continuous-filter / gated message passing predicts formation energy,
+# and finish by running the same attention machinery on 1D
+# tensile-curve sequences.*
 #
 # > **Pre-flight check.** This notebook **assumes** you have run
 # > `notebooks/week10_homework.py`. Block 1 picks up directly from your
@@ -40,8 +47,8 @@
 # | 2 | 12 | Positional encoding: why permutation-equivariance is a bug, not a feature |
 # | 3 | 14 | Tiny ViT: stack two transformer blocks, classify Ising; compare to a CNN |
 # | 4 | 12 | Attention maps as interpretability vs CNN input-gradient saliency |
-# | 5 | 14 | Cross-system transfer: ViT-Ising frozen → Cahn-Hilliard regression |
-# | 6 | 12 | Engineered vs learned features: 3-way bake-off on Cahn-Hilliard |
+# | 5 | 16 | MG-U9: a crystal-graph GNN — continuous-filter & gated message passing for formation energy |
+# | 6 | 12 | MG-U9: extensive vs intensive pooling, the Magpie baseline, and the foundation-model recipe |
 # | 7 | 10 | Same architecture, 1D input: attention on tensile curves |
 # | 8 | 10 | Student exercises (3 core + 1 stretch) |
 
@@ -55,12 +62,10 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset, random_split
 import matplotlib.pyplot as plt
 
-from sklearn.decomposition import PCA
-from sklearn.linear_model import Ridge, LogisticRegression
-from sklearn.metrics import mean_squared_error, r2_score, accuracy_score
-from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import Ridge
+from sklearn.metrics import mean_absolute_error, r2_score
 
-from ai4mat.datasets import IsingDataset, CahnHilliardDataset, TensileTestDataset
+from ai4mat.datasets import IsingDataset, CrystalGraphsDataset, TensileTestDataset
 
 np.random.seed(0)
 torch.manual_seed(0)
@@ -261,7 +266,7 @@ class TinyViT(nn.Module):
         nn.init.trunc_normal_(self.cls, std=0.02)
 
     def encode(self, x: torch.Tensor) -> torch.Tensor:
-        """Return (B, d_model) CLS embedding -- used by Block 5/6."""
+        """Return (B, d_model) CLS embedding (image-side encoder)."""
         B = x.size(0)
         toks = self.patch_embed(patchify(x, patch=self.patch))
         cls = self.cls.expand(B, -1, -1)
@@ -597,169 +602,417 @@ plt.show()
 
 
 # %% [markdown]
-# ## Block 5 — Cross-system transfer: ViT-Ising → Cahn-Hilliard
+# ## Block 5 — MG-U9: a crystal-graph GNN for formation energy
 #
-# We now ask MG's Week 10 question directly: do the embeddings the ViT
-# learned on the Ising classification task carry useful structure to a
-# *different* materials regression task? We freeze the ViT encoder, attach
-# a fresh linear regression head (one per scalar target), and fine-tune
-# only the head on a small Cahn-Hilliard subset that predicts free energy.
+# We now switch from images to **atomic systems**, which is the actual
+# subject of *MG Unit 9 — Neural Networks for Materials Properties*. A
+# crystal is **not a vector and not an image**: it is a graph of atoms
+# under periodic boundary conditions, with a precise set of symmetries
+# (MG-U9 §B). A generic MLP on a composition vector is blind to most of
+# that structure — two polymorphs with the same composition map to the
+# same input (the diamond-vs-graphite failure, MG-U9 slide 07). The
+# architectures in MG-U9 are the ones designed to *respect* atomic-system
+# geometry.
 #
-# To match input shape, we down-pool the 64×64 CH images to 16×16. This
-# loses high-frequency detail but preserves the domain morphology — the
-# physics that mattered for Ising classification is still there.
+# We use `CrystalGraphsDataset`: 200 toy crystals across five prototypes
+# (rocksalt, zincblende, wurtzite, fluorite, perovskite), each a graph of
+# atomic-number nodes and distance-labelled edges, with a synthetic
+# formation energy in eV/atom. We will build, *from scratch*, the two
+# canonical layers MG-U9 teaches:
+#
+# 1. **SchNet-style continuous-filter convolution** (MG-U9 §C, slide 14):
+#    atoms are not on a grid, so the discrete CNN kernel is replaced by a
+#    *function* $W(r) = \mathrm{MLP}(\mathrm{RBF}(r))$ evaluated at the
+#    actual interatomic distance.
+# 2. **CGCNN-style gated message passing** (MG-U9 §D, slide 21): a
+#    per-edge sigmoid *gate* $\sigma$ times a *content* nonlinearity $g$,
+#    summed over neighbours, residual-added.
+#
+# Both are translation-, rotation-, and permutation-invariant **by
+# construction** (MG-U9 slide 08): the only geometric input is the scalar
+# distance $r_{ij}$, and the neighbour aggregation $\sum_{j}$ is symmetric.
 
 # %%
-ch = CahnHilliardDataset(simulation_number=0)
-print(f"Block 5 — CahnHilliardDataset(simulation_number=0): {len(ch)} samples, X {ch.X.shape}, y {ch.y.shape}")
+cg = CrystalGraphsDataset(n_total=200, seed=0)
+print(f"Block 5 — CrystalGraphsDataset: {len(cg)} crystals, "
+      f"{len(cg.prototype_names)} prototypes {cg.prototype_names}")
+print(f"  formation-energy range = [{cg.y.min():.3f}, {cg.y.max():.3f}] eV/atom")
+print(f"  prototype balance: {torch.bincount(cg.prototype).tolist()}")
 
-# Downsample 64 -> 16 by 4x4 average pooling.
-ch_X16 = F.avg_pool2d(ch.X, kernel_size=4)        # (N, 1, 16, 16)
-ch_y = ch.y.numpy()
-print(f"  downsampled X: {ch_X16.shape}, free-energy range = [{ch_y.min():.3f}, {ch_y.max():.3f}]")
+# Unique atomic numbers present -> compact contiguous embedding table.
+_all_Z = torch.cat([cg.species[i] for i in range(len(cg))]).unique().tolist()
+Z2idx = {int(z): k for k, z in enumerate(sorted(_all_Z))}
+n_species = len(Z2idx)
+print(f"  {n_species} distinct elements -> learned Embedding({n_species}, F)")
 
-# 80/20 split.
-N = len(ch)
+
+# %%
+def rbf_expand(r: torch.Tensor, n_rbf: int = 16, r_cut: float = 6.0) -> torch.Tensor:
+    """Gaussian radial basis expansion of distances (MG-U9 slide 13).
+
+    A smooth one-hot encoding of r: centres mu_k spaced 0..r_cut, fixed
+    width. Differentiable in r, so gradients can flow back to positions
+    (the autograd-forces pathway, MG-U9 slide 14).
+    """
+    mu = torch.linspace(0.0, r_cut, n_rbf, device=r.device)
+    beta = (n_rbf / r_cut) ** 2
+    return torch.exp(-beta * (r.unsqueeze(-1) - mu) ** 2)   # (E, n_rbf)
+
+
+class CrystalGNN(nn.Module):
+    """Hand-rolled SchNet/CGCNN-style GNN on crystal graphs (MG-U9 §C/§D).
+
+    - Atom embedding from Z (chemistry channel, MG-U9 slide 20).
+    - n_layers of either continuous-filter ('schnet') or gated ('cgcnn')
+      message passing; geometry enters only via RBF(r_ij).
+    - Permutation-invariant neighbour sum; residual updates.
+    - Readout: 'sum' (extensive) or 'mean' (intensive) over atoms
+      (MG-U9 slide 22) -> per-atom MLP -> scalar.
+    """
+
+    def __init__(self, n_species: int, d_model: int = 32, n_layers: int = 3,
+                 n_rbf: int = 16, conv: str = "cgcnn", readout: str = "mean"):
+        super().__init__()
+        assert conv in ("schnet", "cgcnn")
+        assert readout in ("sum", "mean")
+        self.conv, self.readout, self.n_rbf = conv, readout, n_rbf
+        self.embed = nn.Embedding(n_species, d_model)
+        if conv == "schnet":
+            # W(r) = MLP(RBF(r)) -> per-channel continuous filter.
+            self.filters = nn.ModuleList([
+                nn.Sequential(nn.Linear(n_rbf, d_model), nn.GELU(),
+                              nn.Linear(d_model, d_model))
+                for _ in range(n_layers)
+            ])
+        else:
+            # CGCNN gate/content on [v_i || v_j || RBF(r_ij)].
+            self.gate = nn.ModuleList([
+                nn.Linear(2 * d_model + n_rbf, d_model) for _ in range(n_layers)
+            ])
+            self.content = nn.ModuleList([
+                nn.Linear(2 * d_model + n_rbf, d_model) for _ in range(n_layers)
+            ])
+        self.readout_mlp = nn.Sequential(
+            nn.Linear(d_model, d_model), nn.GELU(), nn.Linear(d_model, 1)
+        )
+
+    def _encode_atoms(self, species, edge_index, edge_distance):
+        """Run message passing; return per-atom features (N_atoms, d_model)."""
+        idx = torch.tensor([Z2idx[int(z)] for z in species.tolist()],
+                            device=species.device)
+        v = self.embed(idx)                                  # (N, d_model)
+        src, dst = edge_index[0], edge_index[1]              # directed both ways
+        rbf = rbf_expand(edge_distance, self.n_rbf)          # (E, n_rbf)
+        n_layers = len(self.filters) if self.conv == "schnet" else len(self.gate)
+        for t in range(n_layers):
+            if self.conv == "schnet":
+                # m_{i<-j} = v_j (Hadamard) W^{(t)}(r_ij)
+                msg = v[src] * self.filters[t](rbf)          # (E, d_model)
+            else:
+                z = torch.cat([v[dst], v[src], rbf], dim=-1)
+                msg = torch.sigmoid(self.gate[t](z)) * F.softplus(self.content[t](z))
+            agg = torch.zeros_like(v)
+            agg.index_add_(0, dst, msg)                      # sum over neighbours
+            v = v + agg                                      # residual update
+        return v
+
+    def forward(self, species, edge_index, edge_distance):
+        v = self._encode_atoms(species, edge_index, edge_distance)
+        pooled = v.sum(0) if self.readout == "sum" else v.mean(0)
+        return self.readout_mlp(pooled).squeeze(-1)          # scalar
+
+    @torch.no_grad()
+    def crystal_embedding(self, species, edge_index, edge_distance):
+        """Pooled crystal-level vector (the MG-U9 §G 'embedding')."""
+        v = self._encode_atoms(species, edge_index, edge_distance)
+        return (v.sum(0) if self.readout == "sum" else v.mean(0)).cpu().numpy()
+
+
+# %% [markdown]
+# ### Block 5a — Permutation invariance is the *correct* symmetry here
+#
+# In Block 2 we had to *break* permutation-equivariance with positional
+# encoding, because image patches have a fixed grid position. For an
+# **unordered set of atoms** the situation is reversed: relabelling the
+# atoms must not change the predicted energy (MG-U9 slide 08, symmetry 3).
+# Our sum-over-neighbours aggregation gives this for free. We verify it
+# numerically — the GNN counterpart of the Block 2 demo.
+
+# %%
+gnn_demo = CrystalGNN(n_species, conv="cgcnn", readout="mean").eval()
+s0, ei0, ed0 = cg.species[0], cg.edge_index[0], cg.edge_distance[0]
+with torch.no_grad():
+    e_orig = gnn_demo(s0, ei0, ed0).item()
+    # Relabel atoms by a random permutation; remap edge indices accordingly.
+    torch.manual_seed(0)
+    pi = torch.randperm(len(s0))
+    inv = torch.argsort(pi)
+    s_perm = s0[pi]
+    ei_perm = torch.stack([inv[ei0[0]], inv[ei0[1]]])
+    e_perm = gnn_demo(s_perm, ei_perm, ed0).item()
+print(f"Block 5a — permutation invariance of the crystal GNN:")
+print(f"  E(graph)              = {e_orig:.6f}")
+print(f"  E(relabelled graph)   = {e_perm:.6f}")
+print(f"  |difference|          = {abs(e_orig - e_perm):.2e}    "
+      f"(~0: invariant by construction, MG-U9 slide 11)")
+
+
+# %% [markdown]
+# ### Block 5b — Train SchNet-conv vs CGCNN-conv on formation energy
+#
+# We train both convolution variants on a chemistry-blind split: the
+# train/test split is over crystals, and we report mean absolute error in
+# eV/atom — the formation-energy metric MG-U9 uses on Materials Project
+# (slide 24). The dataset is graph-structured (variable atom count per
+# crystal), so we loop crystals rather than batch into a tensor; with 200
+# tiny graphs this is still seconds of runtime.
+
+# %%
+N = len(cg)
 rng = np.random.default_rng(0)
-perm = rng.permutation(N)
+order = rng.permutation(N)
 ntr = int(0.8 * N)
-tr_idx, te_idx = perm[:ntr], perm[ntr:]
-X_tr_t = ch_X16[tr_idx]
-X_te_t = ch_X16[te_idx]
-y_tr = ch_y[tr_idx]; y_te = ch_y[te_idx]
+tr_idx, te_idx = order[:ntr].tolist(), order[ntr:].tolist()
+y_all = cg.y.numpy()
+y_tr = y_all[tr_idx]
+y_te = y_all[te_idx]
 
 
-# %%
-def vit_embed(model, X_t, batch=256):
-    model.eval()
-    embs = []
-    with torch.no_grad():
-        for i in range(0, len(X_t), batch):
-            embs.append(model.encode(X_t[i : i + batch]).cpu().numpy())
-    return np.concatenate(embs, axis=0)
-
-
-# (a) ViT-Ising frozen encoder + ridge head
-emb_tr = vit_embed(vit, X_tr_t)
-emb_te = vit_embed(vit, X_te_t)
-print(f"  ViT-Ising embedding: {emb_tr.shape}    (frozen)")
-ridge_vit = Ridge(alpha=1.0).fit(emb_tr, y_tr)
-rmse_vit_ising = float(np.sqrt(mean_squared_error(y_te, ridge_vit.predict(emb_te))))
-r2_vit_ising = float(r2_score(y_te, ridge_vit.predict(emb_te)))
-
-# (b) ViT trained from scratch on Cahn-Hilliard (regression head)
-class TinyViTRegressor(TinyViT):
-    def __init__(self, **kw):
-        super().__init__(**kw, n_classes=1)
-
-
-vit_ch = TinyViTRegressor()
-y_tr_t = torch.tensor(y_tr, dtype=torch.float32)
-y_te_t = torch.tensor(y_te, dtype=torch.float32)
-
-
-def train_regressor(model, X, y, n_epochs=5, lr=3e-3, batch=128, seed=0):
+def train_crystal_gnn(model, idx, n_epochs=30, lr=5e-3, seed=0):
     torch.manual_seed(seed)
-    ds = TensorDataset(X, y)
-    dl = DataLoader(ds, batch_size=batch, shuffle=True)
-    opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
-    for ep in range(n_epochs):
+    opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-5)
+    perm_rng = np.random.default_rng(seed)
+    for _ in range(n_epochs):
         model.train()
-        for xb, yb in dl:
+        for i in perm_rng.permutation(idx):
             opt.zero_grad()
-            pred = model(xb).squeeze(-1)
-            loss = F.mse_loss(pred, yb)
+            pred = model(cg.species[i], cg.edge_index[i], cg.edge_distance[i])
+            loss = (pred - cg.y[i]) ** 2
             loss.backward(); opt.step()
     return model
 
 
-train_regressor(vit_ch, X_tr_t, y_tr_t)
-vit_ch.eval()
+@torch.no_grad()
+def gnn_predict(model, idx):
+    model.eval()
+    return np.array([model(cg.species[i], cg.edge_index[i],
+                           cg.edge_distance[i]).item() for i in idx])
+
+
+gnn_schnet = CrystalGNN(n_species, conv="schnet", readout="mean")
+gnn_cgcnn = CrystalGNN(n_species, conv="cgcnn", readout="mean")
+train_crystal_gnn(gnn_schnet, tr_idx)
+train_crystal_gnn(gnn_cgcnn, tr_idx)
+
+mae_schnet = float(mean_absolute_error(y_te, gnn_predict(gnn_schnet, te_idx)))
+r2_schnet = float(r2_score(y_te, gnn_predict(gnn_schnet, te_idx)))
+mae_cgcnn = float(mean_absolute_error(y_te, gnn_predict(gnn_cgcnn, te_idx)))
+r2_cgcnn = float(r2_score(y_te, gnn_predict(gnn_cgcnn, te_idx)))
+
+print(f"Block 5b — formation-energy regression (MAE in eV/atom):")
+print(f"  {'architecture':<35} {'MAE':>8}   {'R^2':>6}")
+print(f"  {'SchNet-style continuous filter':<35} {mae_schnet:>8.4f}   {r2_schnet:>6.3f}")
+print(f"  {'CGCNN-style gated message pass':<35} {mae_cgcnn:>8.4f}   {r2_cgcnn:>6.3f}")
+print(f"  ({'std of test targets':<35} {y_te.std():>8.4f}   <- predict-the-mean MAE ref)")
+
+
+# %% [markdown]
+# **Reading the result.** Both architectures drive MAE well below the
+# predict-the-mean baseline: the network learns the formation-energy
+# model (prototype baseline + electronegativity difference + radius
+# mismatch) purely from $Z_i$ and $\{r_{ij}\}$, with **no hand-engineered
+# descriptor** — exactly the SchNet headline (MG-U9 slide 15). CGCNN's
+# gated update usually edges out the bare SchNet filter because the gate
+# can adapt to the *chemistry* of each atom pair, not only the distance
+# (MG-U9 slide 21, the SchNet→CGCNN comparison). Run-to-run ordering can
+# flip on this tiny 200-crystal set — the MG-U8 split-discipline caveat:
+# read the gap, not the third decimal.
+
+
+# %% [markdown]
+# ## Block 6 — MG-U9: extensive/intensive pooling, the Magpie baseline, and the foundation-model recipe
+#
+# Three of MG-U9's load-bearing exam points, made concrete on the same
+# dataset:
+#
+# 1. **Sum (extensive) vs mean (intensive) readout** (MG-U9 slide 22):
+#    *"choosing the wrong pooling silently breaks transferability across
+#    cell sizes."* Formation energy *per atom* is **intensive** — mean
+#    pooling is correct; sum pooling scales with cell size and breaks
+#    when the atom count changes.
+# 2. **The MLP-on-Magpie failure** (MG-U9 slide 07): a composition-only
+#    baseline cannot distinguish two prototypes with the same chemistry.
+#    The exercise the deck sets (slide 50) is *CGCNN vs Magpie+MLP*.
+# 3. **The §43 pretrain → freeze → fine-tune recipe**: the GNN trunk is a
+#    materials encoder; its pooled output is the MG-U9 §G "embedding"
+#    (Matformer / OMat24 / MACE-MP-0). Freeze it, fit a cheap linear head
+#    on a new target — *"Unit 9 produces the embedding; Unit 10 studies
+#    it"* (MG-U9 slide 48).
+
+# %%
+# (1) Extensive vs intensive readout. We probe transferability across
+#     cell size by evaluating on 2x supercells (atoms + edges duplicated):
+#     an intensive target must be invariant; sum pooling is not.
+def make_supercell(species, edge_index, edge_distance):
+    """Duplicate the cell once: 2x atoms, block-diagonal edge index."""
+    n = len(species)
+    sp2 = torch.cat([species, species])
+    ei2 = torch.cat([edge_index, edge_index + n], dim=1)
+    ed2 = torch.cat([edge_distance, edge_distance])
+    return sp2, ei2, ed2
+
+
+gnn_mean = gnn_cgcnn                                          # trained, intensive
+gnn_sum = CrystalGNN(n_species, conv="cgcnn", readout="sum")
+train_crystal_gnn(gnn_sum, tr_idx)
+
+gnn_mean.eval(); gnn_sum.eval()
+i_probe = te_idx[0]
 with torch.no_grad():
-    y_pred_scratch = vit_ch(X_te_t).squeeze(-1).cpu().numpy()
-rmse_vit_scratch = float(np.sqrt(mean_squared_error(y_te, y_pred_scratch)))
-r2_vit_scratch = float(r2_score(y_te, y_pred_scratch))
+    sp, ei, ed = cg.species[i_probe], cg.edge_index[i_probe], cg.edge_distance[i_probe]
+    sp2, ei2, ed2 = make_supercell(sp, ei, ed)
+    mean_cell = gnn_mean(sp, ei, ed).item()
+    mean_2x = gnn_mean(sp2, ei2, ed2).item()
+    sum_cell = gnn_sum(sp, ei, ed).item()
+    sum_2x = gnn_sum(sp2, ei2, ed2).item()
 
-# (c) PCA on raw flattened CH pixels + ridge head
-flat_tr = X_tr_t.numpy().reshape(len(X_tr_t), -1)
-flat_te = X_te_t.numpy().reshape(len(X_te_t), -1)
-pca = PCA(n_components=32).fit(flat_tr)
-ridge_pca = Ridge(alpha=1.0).fit(pca.transform(flat_tr), y_tr)
-rmse_pca = float(np.sqrt(mean_squared_error(y_te, ridge_pca.predict(pca.transform(flat_te)))))
-r2_pca = float(r2_score(y_te, ridge_pca.predict(pca.transform(flat_te))))
-
-print(f"\nBlock 5 — Cahn-Hilliard free-energy regression (downsampled 16×16):")
-print(f"  {'method':<35} {'RMSE':>8}   {'R^2':>6}")
-print(f"  {'(a) ViT-Ising frozen + Ridge':<35} {rmse_vit_ising:>8.4f}   {r2_vit_ising:>6.3f}")
-print(f"  {'(b) ViT trained on CH from scratch':<35} {rmse_vit_scratch:>8.4f}   {r2_vit_scratch:>6.3f}")
-print(f"  {'(c) PCA(32) + Ridge':<35} {rmse_pca:>8.4f}   {r2_pca:>6.3f}")
-
-
-# %% [markdown]
-# **Reading the result.** "ViT-Ising frozen" is a *zero-fine-tune* baseline:
-# the encoder was trained on a binary classification of a *different*
-# microstructure family, and we are now asking it to support a *regression*
-# on a different physical system. That it does not collapse to chance is
-# the entire MG transferability story — embeddings carry chemistry/physics
-# across systems, *to the extent the systems share underlying texture*.
-# Often "scratch on CH" wins; sometimes "frozen ViT-Ising" wins, especially
-# when the CH training set is small.
-
-
-# %% [markdown]
-# ## Block 6 — Engineered vs learned features (3-way bake-off)
-#
-# We now isolate the *feature* discussion from the *learning algorithm*
-# discussion. Same ridge regression head everywhere. Three feature
-# extractors, all on the same Cahn-Hilliard target:
-#
-# 1. **Raw flattened pixels** (256-d for the 16×16 image): the simplest
-#    "features", every pixel is a feature.
-# 2. **PCA(32)** on raw pixels: classical engineered linear dimension
-#    reduction.
-# 3. **ViT-Ising frozen embedding** (32-d): non-linear learned
-#    representation transferred from a different system.
-
-# %%
-# (a) raw pixels
-ridge_raw = Ridge(alpha=1.0).fit(flat_tr, y_tr)
-rmse_raw = float(np.sqrt(mean_squared_error(y_te, ridge_raw.predict(flat_te))))
-r2_raw = float(r2_score(y_te, ridge_raw.predict(flat_te)))
-
-# (b) and (c) reuse rmse_pca, rmse_vit_ising from Block 5
-print(f"Block 6 — bake-off on the same target (CH free energy, Ridge head):")
-print(f"  {'feature':<35} {'dim':>6} {'RMSE':>8} {'R^2':>6}")
-print(f"  {'(a) raw flattened pixels':<35} {flat_tr.shape[1]:>6} {rmse_raw:>8.4f} {r2_raw:>6.3f}")
-print(f"  {'(b) PCA(32)':<35} {32:>6} {rmse_pca:>8.4f} {r2_pca:>6.3f}")
-print(f"  {'(c) ViT-Ising frozen (32-d)':<35} {32:>6} {rmse_vit_ising:>8.4f} {r2_vit_ising:>6.3f}")
+print(f"Block 6 (1) — readout vs 2x supercell (target is intensive, eV/atom):")
+print(f"  {'readout':<14} {'unit cell':>12} {'2x supercell':>14} {'drift':>10}")
+print(f"  {'mean (right)':<14} {mean_cell:>12.4f} {mean_2x:>14.4f} {abs(mean_2x-mean_cell):>10.2e}")
+print(f"  {'sum  (wrong)':<14} {sum_cell:>12.4f} {sum_2x:>14.4f} {abs(sum_2x-sum_cell):>10.2e}")
+print(f"  -> mean is invariant under cell doubling; sum roughly doubles. "
+      f"For an *extensive* target (total energy) the verdict flips.")
 
 
 # %%
-fig, ax = plt.subplots(figsize=(7, 4.5))
-labels_bar = ["raw pixels (256-d)", "PCA(32)", "ViT-Ising frozen (32-d)"]
-rmses = [rmse_raw, rmse_pca, rmse_vit_ising]
-ax.bar(labels_bar, rmses, color=["#94a3b8", "#3b82f6", "#8b5cf6"])
-ax.set_ylabel("test RMSE (free-energy units)")
-ax.set_title("Block 6 — same Ridge head, three feature extractors")
-for i, v in enumerate(rmses):
-    ax.text(i, v, f"{v:.4f}", ha="center", va="bottom")
-ax.grid(alpha=0.3, axis="y")
+# (2) Magpie-style composition-only baseline: pool per-element features
+#     (electronegativity, covalent radius) into a fixed vector, fit an MLP.
+#     Blind to structure -> blind to prototype (MG-U9 slide 07).
+from ai4mat.datasets.crystal_graphs import _ELECTRONEGATIVITY, _RADIUS
+
+
+def magpie_vector(species) -> np.ndarray:
+    chi = np.array([_ELECTRONEGATIVITY[int(z)] for z in species.tolist()])
+    rad = np.array([_RADIUS[int(z)] for z in species.tolist()])
+    # Pooled elemental statistics — the Magpie recipe in miniature.
+    return np.array([chi.mean(), chi.std(), chi.min(), chi.max(),
+                     rad.mean(), rad.std(), rad.min(), rad.max(),
+                     float(len(species))], dtype=np.float32)
+
+
+Xm_tr = np.stack([magpie_vector(cg.species[i]) for i in tr_idx])
+Xm_te = np.stack([magpie_vector(cg.species[i]) for i in te_idx])
+
+
+class MagpieMLP(nn.Module):
+    def __init__(self, in_dim: int, hidden: int = 64):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(in_dim, hidden), nn.GELU(),
+            nn.Linear(hidden, hidden), nn.GELU(),
+            nn.Linear(hidden, 1),
+        )
+
+    def forward(self, x):
+        return self.net(x).squeeze(-1)
+
+
+torch.manual_seed(0)
+mu_m, sd_m = Xm_tr.mean(0), Xm_tr.std(0) + 1e-8
+magpie = MagpieMLP(Xm_tr.shape[1])
+opt_m = torch.optim.AdamW(magpie.parameters(), lr=5e-3, weight_decay=1e-5)
+Xm_tr_t = torch.tensor((Xm_tr - mu_m) / sd_m, dtype=torch.float32)
+Xm_te_t = torch.tensor((Xm_te - mu_m) / sd_m, dtype=torch.float32)
+y_tr_t = torch.tensor(y_tr, dtype=torch.float32)
+for _ in range(300):
+    opt_m.zero_grad()
+    loss = F.mse_loss(magpie(Xm_tr_t), y_tr_t)
+    loss.backward(); opt_m.step()
+magpie.eval()
+with torch.no_grad():
+    y_magpie = magpie(Xm_te_t).numpy()
+mae_magpie = float(mean_absolute_error(y_te, y_magpie))
+r2_magpie = float(r2_score(y_te, y_magpie))
+
+print(f"\nBlock 6 (2) — CGCNN vs composition-only Magpie+MLP (MG-U9 slide 50):")
+print(f"  {'model':<35} {'MAE':>8}   {'R^2':>6}")
+print(f"  {'CGCNN-style GNN (structure-aware)':<35} {mae_cgcnn:>8.4f}   {r2_cgcnn:>6.3f}")
+print(f"  {'Magpie+MLP (composition only)':<35} {mae_magpie:>8.4f}   {r2_magpie:>6.3f}")
+print(f"  -> the Magpie vector is identical for two prototypes with the "
+      f"same\n     chemistry; it cannot resolve the prototype baseline "
+      f"(diamond vs graphite, MG-U9 slide 07).")
+
+
+# %%
+# (3) Pretrain -> freeze -> fine-tune (MG-U9 §43/§48). The GNN trunk
+#     pretrained on formation energy becomes a frozen materials encoder;
+#     a cheap Ridge head fits a *new* target on its pooled embedding.
+#     New target: the mean cation-anion electronegativity contrast — a
+#     different property the trunk never optimised for.
+def en_contrast_target(i) -> float:
+    sp = cg.species[i].tolist()
+    chi = np.array([_ELECTRONEGATIVITY[int(z)] for z in sp])
+    return float(chi.max() - chi.min())
+
+
+emb_tr = np.stack([gnn_cgcnn.crystal_embedding(
+    cg.species[i], cg.edge_index[i], cg.edge_distance[i]) for i in tr_idx])
+emb_te = np.stack([gnn_cgcnn.crystal_embedding(
+    cg.species[i], cg.edge_index[i], cg.edge_distance[i]) for i in te_idx])
+t_tr = np.array([en_contrast_target(i) for i in tr_idx])
+t_te = np.array([en_contrast_target(i) for i in te_idx])
+
+head = Ridge(alpha=1.0).fit(emb_tr, t_tr)
+mae_frozen = float(mean_absolute_error(t_te, head.predict(emb_te)))
+r2_frozen = float(r2_score(t_te, head.predict(emb_te)))
+print(f"\nBlock 6 (3) — frozen-trunk transfer to a NEW target "
+      f"(en. contrast):")
+print(f"  frozen CGCNN embedding + Ridge head:  "
+      f"MAE {mae_frozen:.4f}   R^2 {r2_frozen:.3f}")
+print(f"  -> the trunk trained on formation energy already carries "
+      f"chemistry\n     structure transferable to an unseen target. This "
+      f"frozen-encoder ->\n     new-head move is *exactly* the MG-U9 §43 "
+      f"materials foundation-model\n     recipe (Matformer / OMat24 / "
+      f"MACE-MP-0), on crystal graphs.")
+
+
+# %%
+fig, axes = plt.subplots(1, 2, figsize=(12, 4.5))
+labels_bar = ["SchNet\nfilter", "CGCNN\ngated", "Magpie+MLP\n(comp. only)"]
+maes = [mae_schnet, mae_cgcnn, mae_magpie]
+axes[0].bar(labels_bar, maes, color=["#3b82f6", "#8b5cf6", "#94a3b8"])
+axes[0].axhline(y_te.std(), ls="--", c="k", lw=1, label="predict-the-mean")
+axes[0].set_ylabel("test MAE (eV/atom)")
+axes[0].set_title("Block 6 — structure-aware GNN vs composition-only")
+axes[0].legend(); axes[0].grid(alpha=0.3, axis="y")
+for i, v in enumerate(maes):
+    axes[0].text(i, v, f"{v:.3f}", ha="center", va="bottom")
+
+axes[1].bar(["mean\n(intensive)", "sum\n(extensive)"],
+            [abs(mean_2x - mean_cell), abs(sum_2x - sum_cell)],
+            color=["#10b981", "#ef4444"])
+axes[1].set_ylabel("prediction drift on 2x supercell")
+axes[1].set_title("Block 6 — wrong pooling breaks cell-size transfer")
+axes[1].grid(alpha=0.3, axis="y")
 plt.tight_layout(); plt.show()
 
 
 # %% [markdown]
 # Three observations to take with you:
 #
-# - **256-d raw is not necessarily worst.** Ridge can handle 256
-#   features against ~800 training samples and may pick up texture that
-#   a 32-d compression throws away.
-# - **PCA(32) is a *linear* compressor.** It captures the highest-variance
-#   linear directions in CH images. If those happen to correlate with
-#   energy, PCA wins.
-# - **ViT-Ising(32) is a *non-linear, transferred* compressor.** Whether
-#   it beats PCA depends on whether Ising-physics-relevant features
-#   overlap with CH-energy-relevant features. The honest answer for this
-#   16×16 setup is "they often do, because both are texture-driven".
+# - **The structure-aware GNN beats composition-only by a wide margin.**
+#   The Magpie+MLP cannot see the prototype, so it cannot resolve the
+#   prototype-baseline term in the energy — the MG-U9 slide-07 ceiling,
+#   reproduced exactly.
+# - **Pooling is a physics decision, not a hyperparameter.** Mean pooling
+#   is invariant under cell doubling (correct for the *intensive*
+#   per-atom energy); sum pooling roughly doubles. Pick the wrong one and
+#   the model silently fails the moment the cell size changes (MG-U9
+#   slide 22).
+# - **The frozen trunk is a materials foundation model in miniature.**
+#   Pretrain a GNN on one property, freeze it, fit a linear head on a new
+#   target: that is the MG-U9 §43 recipe, and the bridge to MG-U10 —
+#   *"Unit 9 produces the embedding; Unit 10 studies it."*
 
 
 # %% [markdown]
@@ -879,14 +1132,17 @@ print(f"  final val accuracy: {hist_1d['val_acc'][-1]:.3f}    (chance = 1/3 = 0.
 
 
 # %% [markdown]
-# ## Exercise 2 (core) — Unfreeze the last block
+# ## Exercise 2 (core) — Fine-tune the frozen GNN trunk
 #
-# Block 5's frozen-ViT-Ising baseline used the encoder unchanged. Now
-# unfreeze *only the last transformer block* (and the `ln_f` layer) and
-# fine-tune for 3 epochs on the CH regression task. Compare RMSE to the
-# frozen baseline and to the from-scratch ViT-CH. Does fine-tuning help
-# the most when the source (Ising) and target (CH) are similar, or
-# different?
+# Block 6 (3) used the formation-energy-pretrained `gnn_cgcnn` trunk
+# *frozen*, with only a Ridge head fitted on the new electronegativity-
+# contrast target. Now make it a true fine-tune: rebuild the readout MLP
+# of a *copy* of the trunk for the new target, unfreeze only the last
+# message-passing layer plus the readout, and train for ~10 epochs.
+# Compare MAE against the frozen-linear-probe baseline (`mae_frozen`) and
+# a from-scratch `CrystalGNN` on the same target. Which wins, and does
+# the gap match the MG-U9 §43 claim that fine-tuning a pretrained trunk
+# beats from-scratch in the small-data regime?
 
 # %%
 # YOUR CODE for Exercise 2 below.
@@ -1053,12 +1309,18 @@ except ImportError as e:
 # 7. The `[CLS]` token's attention to image patches is a free
 #    interpretability artefact; CNN saliency is per-pixel. Both views
 #    are partial. (Block 4.)
-# 8. **Cross-system transfer** asks whether embeddings learned on one
-#    materials task carry useful structure to another. Frozen-encoder
-#    + new linear head is the cleanest baseline. (Block 5.)
-# 9. At fixed regression head, the **feature extractor** matters: raw
-#    pixels, PCA, and a transferred ViT often disagree by >2x in RMSE.
-#    Which wins is empirical, not pre-determined. (Block 6.)
+# 8. A crystal is a **graph of atoms**, not a vector or an image. A
+#    materials NN must respect four symmetries — translation, rotation,
+#    permutation, periodicity. SchNet's continuous filter $W(r)$ and
+#    CGCNN's gated message passing get the first three for free by using
+#    only the scalar distance $r_{ij}$ and a permutation-invariant
+#    neighbour sum. (Block 5 + 5a + 5b.)
+# 9. **Readout pooling is a physics decision.** Sum = extensive (total
+#    energy); mean = intensive (per-atom energy, band gap). The wrong
+#    choice silently breaks transfer across cell sizes. A composition-only
+#    Magpie+MLP cannot resolve two prototypes with the same chemistry; a
+#    frozen pretrained GNN trunk + linear head is the MG-U9 §43
+#    foundation-model recipe. (Block 6.)
 # 10. The same transformer architecture works on 1D sequences; replacing
 #     "tensile curve" with "XRD pattern" gives you the ML-PC Week 10
 #     pipeline for spectral compression and phase ID, with no

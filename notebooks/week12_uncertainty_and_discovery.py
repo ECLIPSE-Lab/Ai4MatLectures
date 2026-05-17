@@ -1,7 +1,7 @@
 # %% [markdown]
 # # Week 12 — Uncertainty and discovery
 #
-# This week we braid three lectures:
+# This week we braid the true calendar-Week-12 triad:
 #
 # 1. **MFML Unit 12**: Uncertainty in predictions — Gaussian Processes (the
 #    main tool), MC dropout, deep ensembles, mixture-density networks,
@@ -9,16 +9,31 @@
 # 2. **ML-PC Unit 11**: Materials UQ case studies — 21CrMoV5-7 GP for
 #    hardness, MC-dropout SEM segmentation, additive-manufacturing active
 #    learning. Lab-story anchor.
-# 3. **MG (curriculum) → slides folder 11**: Clustering vs discovery in
-#    materials spaces — top-k retrieval, per-cluster acquisition budgets,
-#    the discovery-vs-labeling distinction.
+# 3. **MG Unit 12**: Generative models & inverse design — sampling
+#    structures from a learned $p(x\mid y^\star)$, conditional vs
+#    unconditional generation, classifier-free guidance, the discovery
+#    funnel, and S.U.N. (Stable/Unique/Novel) screening. Generative anchor.
+#
+# > **Note on the MG braid (read once).** Earlier drafts of this notebook
+# > declared an MG lecture *"slides folder 11: clustering vs discovery in
+# > materials spaces"*. Per `materials_genomics/REALIGNMENT_2026-05-13.md`
+# > standalone clustering-as-discovery was **dropped** and old folder 11
+# > was repurposed/renamed to `12_generative_models_and_inverse_design`.
+# > The true calendar-Week-12 MG lecture is therefore **Unit 12:
+# > Generative Models & Inverse Design**. The original GP active-learning /
+# > per-cluster-discovery content (Blocks 2–6) is *retained* — it is the
+# > natural **bridge** into the generative half: the same predictive-
+# > variance UQ that drove acquisition now drives the "uncertainty triage"
+# > stage of the inverse-design discovery funnel (new Block 6.5). The MFML
+# > Unit 12 uncertainty braid is unchanged and intentionally central.
 #
 # **Red thread:** *Materials discovery loops live or die on uncertainty:
 # tight error bars say "exploit", wide ones say "explore", and an outlier
 # *without* uncertainty is just noise. This week we braid Gaussian
-# Processes (MFML), real lab case studies (ML-PC), and the discovery-vs-
-# labeling distinction (MG) into an end-to-end Bayesian-optimization-style
-# materials-acceleration loop.*
+# Processes (MFML), real lab case studies (ML-PC), and a conditional
+# generative model with an inverse-design discovery funnel (MG) into an
+# end-to-end "generate → screen → triage-by-uncertainty" materials-
+# acceleration loop.*
 #
 # > **Pre-flight check.** This notebook **assumes** you have run
 # > `notebooks/week12_homework.py`. Block 1 picks up directly from your GP
@@ -33,9 +48,10 @@
 # | 2 | 15  | MLPC anchor — GP active learning on `TensileTestDataset(T=600)` |
 # | 3 | 12  | Acquisition functions — UCB / EI / PI on the same AL loop |
 # | 4 | 12  | Cost-aware AL — combining cheap T=600 with expensive T=0 |
-# | 5 | 15  | MG anchor — clustering vs discovery on `NanoindentationDataset` |
-# | 6 | 15  | Per-cluster acquisition budgets — equal / proportional / top-k |
-# | 7 | 16  | Student exercises (3 core + 1 stretch) |
+# | 5 | 15  | Discovery bridge — clustering vs discovery on `NanoindentationDataset` |
+# | 6 | 12  | Per-cluster acquisition budgets — equal / proportional / top-k |
+# | 6.5 | 18 | MG U12 anchor — conditional generative model + inverse-design funnel |
+# | 7 | 16  | Student exercises (3 core + 2 stretch) |
 
 # %%
 # Standard imports for the whole in-class. Same idiom as weeks 2-11.
@@ -1062,9 +1078,439 @@ plt.show()
 
 
 # %% [markdown]
+# # Block 6.5 — MG Unit 12 anchor: a conditional generative model + the inverse-design funnel
+#
+# Everything so far was **forward**: given a material (E, or strain, or an
+# (E, H) point) predict a property and ask *where should I measure next?*
+# MG Unit 12 inverts the arrow. Instead of *searching* the materials space
+# we **sample from a learned conditional distribution** $p(x \mid y^\star)$:
+# name a target property $y^\star$, get a stream of candidate materials.
+#
+# **The deck's spine (CDVAE → DiffCSP → MatterGen → FlowMM → CrystaLLM).**
+# Real crystal generators denoise/flow over (composition, lattice,
+# fractional coordinates, space group) with equivariant GNNs and cost
+# O(100) network passes per sample. That is far out of scope for an
+# in-class cell. We build the *tractable teaching analogue* the deck itself
+# motivates: a small **conditional VAE (CVAE)** over the 2-D
+# `NanoindentationDataset` representation $x = (E, H)$ already used in
+# Blocks 5–6, conditioned on a target hardness $H^\star$. A CVAE is the
+# "VAE / FTCP" row of the deck's landscape table — the legacy method that
+# *motivated* the design choices diffusion later inherited — so it is
+# exactly the right pedagogical entry point, and `sample from p(x | y*)`
+# becomes one forward pass instead of 100.
+#
+# We exercise four things the deck teaches, in order:
+#
+# 1. **Forward vs inverse / a learned $p(x\mid y^\star)$** — train the CVAE,
+#    then *generate* (E, H) candidates conditioned on a hardness target.
+# 2. **Conditional vs unconditional generation + classifier-free-guidance
+#    (CFG)** — the deck's $\tilde s = (1+w)\,s_{\text{cond}} -
+#    w\,s_{\text{uncond}}$ trick has an exact CVAE analogue: decode with
+#    a guidance-scaled blend of the conditional and unconditional
+#    (label-dropped) latent codes and watch the fidelity↔diversity knob.
+# 3. **The discovery funnel + S.U.N.** — push generated candidates through
+#    *generate → validity pre-filter → uniqueness → novelty → on-target →
+#    uncertainty triage* and report the pass rate at every stage (the
+#    deck's "each stage trims by 10–100×" picture).
+# 4. **Uncertainty-aware filtering = the generative↔UQ bridge** — the
+#    triage stage reuses the **per-cluster GP predictive variance from
+#    Block 5**: reject candidates the surrogate cannot vouch for. This is
+#    the single cleanest MFML × ML-PC × MG braid in the notebook.
+#
+# *(see MG U12 §"Forward vs Inverse Problems", §"Conditional vs
+# Unconditional Generation", §"The Discovery Funnel", §"The S.U.N. Metric",
+# §"Classifier vs Classifier-Free Guidance", §"Uncertainty-Aware
+# Filtering"; bridges to MFML §"GP posterior" and ML-PC §"21CrMoV5-7 GP".)*
+
+# %%
+# Reuse the Block-5 nanoindentation arrays (Xn, yn, cluster_id,
+# per_cluster_gp, Xn_std, mu_n, sd_n). The CVAE works in the *standardised*
+# (E, H) space so the latent prior and reconstruction loss are well-scaled;
+# we map back to physical units only for screening / plotting.
+Xn_z = (Xn - mu_n) / sd_n                       # (N, 2) standardised, same scaling as Block 5
+H_raw = Xn[:, 1]                                # physical hardness (GPa) — the conditioning target
+H_mean, H_std = float(H_raw.mean()), float(H_raw.std())
+
+
+def cond_norm(h_phys):
+    """Standardise a physical hardness value to the CVAE conditioning scale."""
+    return (np.asarray(h_phys, dtype=np.float32) - H_mean) / H_std
+
+
+# Conditioning signal c = standardised hardness, shape (N, 1).
+c_all = cond_norm(H_raw).reshape(-1, 1)
+print(f"CVAE data: N={len(Xn_z)}   x=(E,H) standardised   "
+      f"conditioner = hardness in [{H_raw.min():.2f}, {H_raw.max():.2f}] GPa")
+
+
+# %%
+# A deliberately tiny conditional VAE: 2-D data, 2-D latent, one small
+# hidden layer each side. Same torch idiom as the QuantileHead in Block 4.5.
+#
+# Classifier-free-guidance hook: during training we randomly *drop* the
+# conditioning signal (replace c by a learned/zeroed null token) with
+# probability p_drop. The decoder therefore learns BOTH a conditional and
+# an unconditional model in one set of weights — exactly the precondition
+# CFG needs (deck §"Classifier-free guidance": one model, two passes).
+class CVAE(nn.Module):
+    def __init__(self, x_dim=2, c_dim=1, z_dim=2, hidden=32):
+        super().__init__()
+        self.z_dim = z_dim
+        self.enc = nn.Sequential(
+            nn.Linear(x_dim + c_dim, hidden), nn.ReLU(),
+            nn.Linear(hidden, hidden), nn.ReLU(),
+        )
+        self.fc_mu = nn.Linear(hidden, z_dim)
+        self.fc_lv = nn.Linear(hidden, z_dim)
+        self.dec = nn.Sequential(
+            nn.Linear(z_dim + c_dim, hidden), nn.ReLU(),
+            nn.Linear(hidden, hidden), nn.ReLU(),
+            nn.Linear(hidden, x_dim),
+        )
+
+    def encode(self, x, c):
+        h = self.enc(torch.cat([x, c], dim=1))
+        return self.fc_mu(h), self.fc_lv(h)
+
+    def reparameterise(self, mu, logvar):
+        std = torch.exp(0.5 * logvar)
+        return mu + std * torch.randn_like(std)
+
+    def decode(self, z, c):
+        return self.dec(torch.cat([z, c], dim=1))
+
+    def forward(self, x, c):
+        mu, lv = self.encode(x, c)
+        z = self.reparameterise(mu, lv)
+        return self.decode(z, c), mu, lv
+
+
+# %%
+# Train the CVAE. Standard VAE ELBO = reconstruction (MSE) + beta * KL,
+# with the CFG label-dropout described above. Few epochs, tiny model, CPU
+# in well under a minute.
+torch.manual_seed(0)
+cvae = CVAE(x_dim=2, c_dim=1, z_dim=2, hidden=32)
+opt_v = torch.optim.Adam(cvae.parameters(), lr=5e-3)
+
+x_t = torch.tensor(Xn_z, dtype=torch.float32)
+c_t = torch.tensor(c_all, dtype=torch.float32)
+N = x_t.shape[0]
+
+beta_kl = 0.5            # mild KL pressure: keep the latent usable for sampling
+p_drop = 0.15            # CFG conditioning-dropout probability
+batch = 128
+rng_v = np.random.default_rng(0)
+
+for epoch in range(120):
+    order = rng_v.permutation(N)
+    epoch_loss = 0.0
+    for s in range(0, N, batch):
+        idx = order[s:s + batch]
+        xb = x_t[idx]
+        cb = c_t[idx].clone()
+        # CFG: drop the label on a random subset -> unconditional pathway.
+        drop = torch.rand(cb.shape[0]) < p_drop
+        cb[drop] = 0.0                       # 0 == "null token" (data is standardised, so 0 ~ mean)
+        xr, mu_z, lv_z = cvae(xb, cb)
+        rec = ((xr - xb) ** 2).sum(dim=1).mean()
+        kl = (-0.5 * (1 + lv_z - mu_z.pow(2) - lv_z.exp()).sum(dim=1)).mean()
+        loss = rec + beta_kl * kl
+        opt_v.zero_grad(); loss.backward(); opt_v.step()
+        epoch_loss += float(loss) * len(idx)
+    if epoch % 30 == 0 or epoch == 119:
+        print(f"epoch {epoch:3d}   ELBO loss = {epoch_loss / N:.4f}")
+
+
+# %%
+# ---- Generation: sample from p(x | H*) with classifier-free guidance ----
+#
+# CFG analogue for a CVAE decoder. Pure conditional decode = decode(z, c*).
+# Pure unconditional decode = decode(z, 0). The deck mixes the conditional
+# and unconditional *scores*; for a deterministic decoder the natural,
+# widely-used analogue is to extrapolate the decoded mean along the
+# (conditional - unconditional) direction:
+#
+#   x_cfg = x_uncond + (1 + w) * (x_cond - x_uncond)
+#
+# w = 0 -> plain conditional; w > 0 -> push the sample further along the
+# "conditioning made a difference" direction. The deck is explicit that
+# the guidance strength is "a constant battle": too little and the sample
+# ignores the target; too much and it *overshoots* past it (mode-seeking,
+# low diversity). Both failure modes are visible below — exactly the
+# fidelity<->diversity trade-off the deck warns about.
+def generate(model, h_target_phys, n_samples, guidance_w=0.0, seed=0):
+    """Sample n_samples (E, H) candidates conditioned on a hardness target.
+
+    Returns candidates in PHYSICAL units (GPa), shape (n_samples, 2).
+    """
+    torch.manual_seed(seed)
+    c_star = torch.full((n_samples, 1), float(cond_norm(h_target_phys)))
+    c_null = torch.zeros((n_samples, 1))
+    z = torch.randn(n_samples, model.z_dim)
+    with torch.no_grad():
+        x_cond = model.decode(z, c_star)
+        if guidance_w == 0.0:
+            x_gen = x_cond
+        else:
+            x_uncond = model.decode(z, c_null)
+            x_gen = x_uncond + (1.0 + guidance_w) * (x_cond - x_uncond)
+    x_gen = x_gen.numpy()
+    return x_gen * sd_n + mu_n                   # de-standardise to (E [GPa], H [GPa])
+
+
+# Pick a target on the harder end of the observed range — the kind of
+# "I want a stiffer/harder phase" inverse-design ask the deck describes.
+H_STAR = float(np.percentile(H_raw, 80))
+print(f"inverse-design target: H* = {H_STAR:.2f} GPa (80th pct of observed hardness)")
+
+for w in (0.0, 0.4, 1.5, 4.0):
+    g = generate(cvae, H_STAR, n_samples=400, guidance_w=w, seed=1)
+    err = np.abs(g[:, 1] - H_STAR)
+    print(f"  CFG w={w:>3.1f}:  mean |H_gen - H*| = {err.mean():.3f} GPa   "
+          f"H_gen spread (std) = {g[:, 1].std():.3f} GPa")
+print("  (w=0 already on-target here: the conditional signal is strong, so "
+      "small w refines and large w overshoots — the deck's exact warning.)")
+
+
+# %%
+# Visualise: unconditional cloud vs conditional-at-H* vs CFG-sharpened.
+g_uncond = generate(cvae, float(H_raw.mean()), n_samples=400, guidance_w=0.0, seed=2)
+g_cond   = generate(cvae, H_STAR, n_samples=400, guidance_w=0.0, seed=3)
+g_cfg    = generate(cvae, H_STAR, n_samples=400, guidance_w=2.0, seed=3)
+
+fig, axes = plt.subplots(1, 2, figsize=(13, 5.2))
+
+ax = axes[0]
+ax.scatter(Xn[:, 0], Xn[:, 1], c="lightgray", s=10, alpha=0.5, label="real data")
+ax.scatter(g_uncond[:, 0], g_uncond[:, 1], c="#1f77b4", s=12, alpha=0.5,
+           label="generated (unconditional ~mean H)")
+ax.scatter(g_cond[:, 0], g_cond[:, 1], c="#d62728", s=12, alpha=0.6,
+           label=f"generated (conditional H*={H_STAR:.1f})")
+ax.axhline(H_STAR, color="#d62728", ls="--", lw=1.2)
+ax.set_xlabel("E (GPa)"); ax.set_ylabel("H (GPa)")
+ax.set_title("Inverse design: sampling p(x | H*)"); ax.legend(fontsize=8, loc="upper left")
+
+ax = axes[1]
+ax.hist(g_cond[:, 1], bins=30, alpha=0.55, color="#d62728",
+        label="conditional (w=0, already on-target)")
+ax.hist(g_cfg[:, 1],  bins=30, alpha=0.55, color="#9467bd",
+        label="over-guided (w=2, overshoots)")
+ax.axvline(H_STAR, color="k", ls="--", lw=1.5, label=f"H* = {H_STAR:.1f}")
+ax.set_xlabel("generated hardness H (GPa)"); ax.set_ylabel("count")
+ax.set_title("CFG knob: w=0 hits H*; too-large w overshoots")
+ax.legend(fontsize=9)
+plt.tight_layout()
+plt.show()
+
+
+# %% [markdown]
+# **Read these two panels.** Left: the unconditional samples (blue) spread
+# over the whole materials cloud; conditioning on $H^\star$ (red)
+# collapses the stream onto the requested hardness band — this is
+# `sample from p(x \mid y^\star)` made concrete. Right: here the
+# conditioning signal is *strong*, so the plain conditional ($w=0$, red)
+# already sits on $H^\star$; pushing classifier-free guidance to $w=2$
+# (purple) does **not** tighten further — it *overshoots* past the target
+# and broadens, the deck's explicit warning that the guidance strength is
+# "a constant battle" (too little ignores the target, too much overshoots
+# and kills diversity). The useful regime here is *small* $w$
+# (Exercise 6 sweeps it). Note the CVAE is the deck's *legacy "VAE" row*:
+# it is the right teaching scaffold, not a SOTA generator —
+# DiffCSP/MatterGen/FlowMM swap the decoder for an equivariant
+# denoiser/flow but keep this conditioning logic identical.
+
+# %%
+# ---- The discovery funnel + S.U.N.-style screening ----
+#
+# Deck §"The Discovery Funnel" / §"The S.U.N. Metric": a generated stream
+# is only useful after a multi-stage filter, each stage trimming ~10-100x.
+# We instantiate the deck's funnel on the 2-D analogue:
+#
+#   generate (wide top)            -> raw candidates
+#   -> VALIDITY  pre-filter        : physically plausible (E, H) > 0 and
+#                                    inside a generous bounding box of the
+#                                    known materials envelope
+#   -> UNIQUENESS within the batch : de-duplicate near-identical samples
+#                                    (grid-snap in standardised space)
+#   -> NOVELTY vs the training set : min distance to any real point above
+#                                    a threshold (not a rediscovery)
+#   -> ON-TARGET (task fidelity)   : |H_gen - H*| within tolerance
+#   -> UNCERTAINTY TRIAGE          : the Block-5 per-cluster GP must be
+#                                    *confident* about the candidate
+#                                    (predictive sd below a cutoff) — the
+#                                    generative <-> UQ bridge
+#
+# "S.U.N." = Stable . Unique . Novel; we report the surviving fraction
+# after the U+N stages and the final end-to-end yield, the deck's headline
+# metric ("report as a rate").
+# Novelty threshold: the standardised nearest-neighbour distance among the
+# *real* materials has a 75th-percentile of ~0.05, so a tol of 0.08 means
+# "further from every known material than the dataset's own resolution" —
+# the 2-D analogue of the deck's fingerprint-distance novelty test.
+def discovery_funnel(cand_phys, h_target, sd_n_, mu_n_,
+                      novelty_tol=0.08, target_tol=0.30, gp_sd_cutoff=None,
+                      verbose=True):
+    """Run the multi-stage funnel; return surviving candidates + a stage table."""
+    stages = []
+    x = cand_phys
+    stages.append(("0. generated (raw)", len(x)))
+
+    # --- VALIDITY: positive moduli + within a generous data bounding box.
+    E_lo, E_hi = Xn[:, 0].min() * 0.7, Xn[:, 0].max() * 1.3
+    H_lo, H_hi = Xn[:, 1].min() * 0.7, Xn[:, 1].max() * 1.3
+    valid = (x[:, 0] > 0) & (x[:, 1] > 0) & \
+            (x[:, 0] >= E_lo) & (x[:, 0] <= E_hi) & \
+            (x[:, 1] >= H_lo) & (x[:, 1] <= H_hi)
+    x = x[valid]
+    stages.append(("1. validity (physical + in-envelope)", len(x)))
+
+    # --- UNIQUENESS: grid-snap in standardised space, drop duplicates.
+    xz = (x - mu_n_) / sd_n_
+    keys = np.round(xz / 0.05).astype(np.int64)
+    _, uniq_idx = np.unique(keys, axis=0, return_index=True)
+    x = x[np.sort(uniq_idx)]
+    stages.append(("2. uniqueness (intra-batch dedup)", len(x)))
+
+    # --- NOVELTY: far enough from every real training point.
+    if len(x):
+        xz = (x - mu_n_) / sd_n_
+        d = np.linalg.norm(xz[:, None, :] - Xn_z[None, :, :], axis=2).min(axis=1)
+        novel = d > novelty_tol
+        x = x[novel]
+    stages.append(("3. novelty (vs training set)", len(x)))
+
+    # --- S.U.N. rate: fraction of the *raw* batch that is Unique AND Novel.
+    sun_rate = len(x) / max(stages[0][1], 1)
+
+    # --- ON-TARGET: predicted property close to the conditioning target.
+    if len(x):
+        on_target = np.abs(x[:, 1] - h_target) <= target_tol
+        x = x[on_target]
+    stages.append(("4. on-target (|H - H*| <= tol)", len(x)))
+
+    # --- UNCERTAINTY TRIAGE: assign each survivor to its nearest Block-5
+    #     cluster centroid, score predictive sd with that cluster's GP,
+    #     keep only the candidates the surrogate is confident about.
+    #     The cutoff is *relative*: the deck asks for candidates where the
+    #     surrogate is "both good and confident", so we admit the candidates
+    #     whose predictive sd is no worse than the surrogate's typical sd on
+    #     genuine on-target training points (60th-pct of that reference).
+    if len(x):
+        xz = (x - mu_n_) / sd_n_
+        cl = np.argmin(
+            np.linalg.norm(xz[:, None, :] - centroids_std[None, :, :], axis=2), axis=1)
+        gp_sd = np.full(len(x), np.inf)
+        for k, gp_k in per_cluster_gp.items():
+            m = (cl == k)
+            if m.any():
+                _, sd_k = gp_k.predict(x[m, 0:1], return_std=True)
+                gp_sd[m] = sd_k
+        if gp_sd_cutoff is None:
+            # Reference: GP sd on the REAL on-target points (the calibration
+            # the surrogate already achieves on data we trust).
+            ref_mask = np.abs(Xn[:, 1] - h_target) <= target_tol
+            ref_pts = Xn[ref_mask]
+            if len(ref_pts):
+                ref_cl = np.argmin(
+                    np.linalg.norm(((ref_pts - mu_n_) / sd_n_)[:, None, :]
+                                   - centroids_std[None, :, :], axis=2), axis=1)
+                ref_sd = np.full(len(ref_pts), np.inf)
+                for k, gp_k in per_cluster_gp.items():
+                    m = (ref_cl == k)
+                    if m.any():
+                        _, s_ = gp_k.predict(ref_pts[m, 0:1], return_std=True)
+                        ref_sd[m] = s_
+                gp_sd_cutoff = float(np.percentile(ref_sd[np.isfinite(ref_sd)], 60))
+            else:
+                gp_sd_cutoff = float(np.median([np.sqrt(v) for v in mean_var_per_cluster]))
+        confident = gp_sd <= gp_sd_cutoff
+        x = x[confident]
+    stages.append(("5. uncertainty triage (Block-5 GP confident)", len(x)))
+
+    if verbose:
+        print(f"  {'stage':<46s}{'#kept':>7s}{'frac':>9s}")
+        n0 = max(stages[0][1], 1)
+        for name, n in stages:
+            print(f"  {name:<46s}{n:>7d}{n / n0:>8.1%}")
+        print(f"  S.U.N. rate (Stable*Unique*Novel proxy) = {sun_rate:.1%}")
+        print(f"  end-to-end discovery yield              = {len(x) / n0:.1%}")
+    return x, stages, sun_rate
+
+
+# Wide top of funnel: over-generate, exactly as the deck insists. Use a
+# small guidance weight (w=0.4) — the conditional is already on-target, so
+# light guidance refines without overshooting (see the CFG panel above).
+raw = generate(cvae, H_STAR, n_samples=5000, guidance_w=0.4, seed=7)
+survivors, stage_table, sun = discovery_funnel(raw, H_STAR, sd_n, mu_n,
+                                                target_tol=0.40)
+
+
+# %%
+# Funnel waterfall + where the survivors land in (E, H) space.
+fig, axes = plt.subplots(1, 2, figsize=(13, 5.2))
+
+ax = axes[0]
+labels = [s[0] for s in stage_table]
+counts = [s[1] for s in stage_table]
+ax.barh(range(len(counts)), counts, color="#1f77b4")
+ax.set_yticks(range(len(labels)))
+ax.set_yticklabels(labels, fontsize=8)
+ax.invert_yaxis()
+ax.set_xscale("log")
+ax.set_xlabel("# candidates surviving (log)")
+ax.set_title(f"Discovery funnel (S.U.N. proxy = {sun:.1%})")
+for i, c in enumerate(counts):
+    ax.text(max(c, 1), i, f" {c}", va="center", fontsize=8)
+
+ax = axes[1]
+ax.scatter(Xn[:, 0], Xn[:, 1], c="lightgray", s=10, alpha=0.4, label="real data")
+ax.scatter(raw[:, 0], raw[:, 1], c="#1f77b4", s=4, alpha=0.10, label="raw generated (5000)")
+if len(survivors):
+    ax.scatter(survivors[:, 0], survivors[:, 1], c="#d62728", s=40, zorder=5,
+               edgecolor="k", linewidth=0.4, label=f"survivors ({len(survivors)})")
+ax.axhline(H_STAR, color="#d62728", ls="--", lw=1.2, label=f"H* = {H_STAR:.1f}")
+ax.set_xlabel("E (GPa)"); ax.set_ylabel("H (GPa)")
+ax.set_title("Where the funnel survivors land")
+ax.legend(fontsize=8, loc="upper left")
+plt.tight_layout()
+plt.show()
+
+
+# %% [markdown]
+# **Read these two panels.** Left: the deck's funnel made literal — each
+# stage trims the stream (note the log axis); the wide top is *mandatory*
+# because the end-to-end yield is a small fraction of a percent, which is
+# why real pipelines over-generate by $10^5$–$10^6$. Right: the handful of
+# survivors (red) sit on the requested hardness line $H^\star$, away from
+# the dense training cloud (novelty) and only where the Block-5 GP is
+# confident — these are the candidates a lab would actually queue for
+# synthesis.
+#
+# **The braid, stated plainly.** The *uncertainty-triage* stage is not a
+# new idea bolted on: it is literally the **Block-5 per-cluster GP
+# predictive variance** (MFML's UQ machinery, ML-PC's 21CrMoV5-7-style
+# hardness GP) deciding which *generated* (MG) candidate is trustworthy
+# enough to act on. Generation proposes; uncertainty disposes. That is the
+# operational stack the MG deck calls "generative + universal MLIP + UQ +
+# autonomous lab" — here in miniature on one slide of code.
+#
+# **Honest caveats.** (1) A 2-D CVAE on (E, H) is a *teaching analogue*:
+# real crystal generators sample (composition, lattice, coordinates, space
+# group) with equivariant denoisers — the deck's CDVAE→DiffCSP→MatterGen→
+# FlowMM lineage — but the conditional-sampling, CFG, and funnel logic are
+# structurally identical. (2) Our "stability" proxy is *in-envelope
+# validity*, not an energy-above-hull / convex-hull computation; the deck
+# is explicit that real S.U.N. depends on the reference hull (MP-2024 vs
+# Alexandria). (3) The novelty/target/uncertainty thresholds are policy
+# choices, as in Block 5 — Exercise 6 sweeps the guidance weight and the
+# funnel cutoffs so you feel how the yield/quality trade-off moves.
+
+
+# %% [markdown]
 # # Block 7 — Student exercises
 #
-# **Three core (do all three) + one stretch (optional).** Write your code
+# **Three core (do all three) + two stretch (optional).** Write your code
 # in the empty cells below; bring printed plots / numbers to the next class
 # for the 5-minute walk-through.
 
@@ -1337,6 +1783,52 @@ plt.show()
 
 
 # %% [markdown]
+# ## Exercise 6 (stretch, optional) — Guidance weight vs the discovery funnel
+#
+# Block 6.5 fixed the classifier-free-guidance weight at $w=2$ for the
+# funnel run and used median-based funnel cutoffs. CFG is the deck's
+# explicit *fidelity ↔ diversity* knob: cranking $w$ pushes generated
+# hardness onto the target but collapses diversity, which can *starve* the
+# novelty stage of the funnel. This exercise quantifies that tension.
+#
+# **Your task:**
+#
+# 1. For $w \in \{0, 1, 2, 4, 8\}$, generate 5000 candidates at `H_STAR`
+#    with `generate(cvae, H_STAR, n_samples=5000, guidance_w=w, seed=7)`.
+# 2. Run each batch through `discovery_funnel(..., verbose=False)`.
+# 3. Plot, on a shared $w$ axis: (a) the S.U.N. proxy rate, (b) the
+#    end-to-end discovery yield, and (c) the mean $|H_{\text{gen}} - H^\star|$
+#    of the *raw* batch (fidelity).
+# 4. **Question (3 sentences).** Where is the sweet spot, and *why* does
+#    pushing $w$ too high eventually reduce the number of synthesis-ready
+#    survivors even though on-target fidelity keeps improving?
+#
+# *Hint: reuse `generate` and `discovery_funnel` directly — no retraining.
+# `discovery_funnel` already returns `(survivors, stages, sun_rate)`.*
+
+# %%
+# TODO: your guidance-weight sweep goes here.
+# Skeleton:
+#
+#   ws = [0, 1, 2, 4, 8]
+#   sun_rates, yields, fidelities = [], [], []
+#   for w in ws:
+#       raw_w = generate(cvae, H_STAR, n_samples=5000, guidance_w=w, seed=7)
+#       surv_w, _, sun_w = discovery_funnel(raw_w, H_STAR, sd_n, mu_n,
+#                                           verbose=False)
+#       sun_rates.append(sun_w)
+#       yields.append(len(surv_w) / len(raw_w))
+#       fidelities.append(float(np.abs(raw_w[:, 1] - H_STAR).mean()))
+#   # plot the three curves vs ws ...
+
+
+# %% [markdown]
+# > # Your answer to the sweet-spot question:
+# >
+# > *(replace this text with your 3-sentence explanation)*
+
+
+# %% [markdown]
 # ## Exam-aligned must-know statements (from MFML Unit 12 §"Exam-aligned")
 #
 # Re-read these after the exercises; today's blocks have given you the
@@ -1366,3 +1858,24 @@ plt.show()
 # 10. Multi-fidelity GPs combine cheap-noisy and expensive-clean data and
 #     can beat either single-fidelity baseline for intermediate budgets
 #     (Block 7 stretch).
+#
+# ## Exam-aligned must-know statements (from MG Unit 12 §"Key Takeaways")
+#
+# 11. Inverse design = sampling from a learned conditional distribution
+#     $p(x \mid y^\star)$, not searching $\mathcal{X}$; the inverse problem
+#     is many-to-one and ill-posed (Block 6.5).
+# 12. Conditional generation targets a property; unconditional samples the
+#     full data distribution and needs heavy filtering — conditioning
+#     quality dominates downstream success (Block 6.5).
+# 13. Classifier-free guidance mixes the conditional and unconditional
+#     model ($\tilde s = (1+w)\,s_{\text{cond}} - w\,s_{\text{uncond}}$);
+#     $w$ is the fidelity↔diversity knob (Block 6.5, Exercise 6).
+# 14. Generated structures must pass the discovery funnel — validity →
+#     uniqueness → novelty → on-target → uncertainty triage — and S.U.N.
+#     (Stable/Unique/Novel) is reported as a *rate*; every stage trims by
+#     ~10–100× so the top of the funnel must be very wide (Block 6.5).
+# 15. Uncertainty-aware filtering is the generative↔UQ bridge: the
+#     surrogate's predictive variance decides which generated candidate is
+#     trustworthy enough for expensive validation (Block 6.5 — reuses the
+#     Block-5 per-cluster GP). Diffusion (CDVAE/DiffCSP/MatterGen) and flow
+#     (FlowMM) swap the decoder but keep this loop identical.

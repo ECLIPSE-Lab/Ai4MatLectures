@@ -1,28 +1,34 @@
 # %% [markdown]
-# # Week 11 — Generative inverse design
+# # Week 11 — Generative models, embedding diagnostics & lab automation
 #
-# This week we braid three lectures around one move: **flip the
-# encoder-decoder around and use the latent space to generate candidates
-# under a target property.**
+# This week braids the three lectures that materials students actually
+# sit on 23.06, around one spine: **a learned representation is only as
+# good as what it lets you do downstream — generate, diagnose, automate.**
 #
 # 1. **MFML Unit 11**: Generative models — VAE, β-VAE, conditional VAE,
 #    DDPM as historical anchor, **flow matching** as the 2026 default
 #    [@lipman_2023_flow_matching], **consistency models** for one-step
-#    sampling [@song_2023_consistency].
-# 2. **ML-PC Unit 11** (`unit08_inverse_problems`): generative inverse
-#    design — VAE-based property targeting, **flow-matching-based**
-#    microstructure generation, failure modes (mode collapse, OOD targets).
-# 3. **MG Unit 10** (delivered as W11): latent spaces of materials —
-#    composition–structure–property maps, **latent-space arithmetic for
-#    property targeting**.
+#    sampling [@song_2023_consistency]. *(Blocks 1–4, 6; the spine.)*
+# 2. **MG Unit 10** (Representation Learning & Feature Discovery, the true
+#    calendar-W11 MG lecture): **embedding diagnostics** — linear probe vs
+#    random-init baseline vs engineered (Magpie-style) features,
+#    nearest-neighbour retrieval, and the deck's signature **"pretty
+#    t-SNE / dead downstream"** anti-pattern. The W11 deck explicitly
+#    *defers* generative latent arithmetic to MG U12, so Block 5 is now
+#    diagnostics, not property-targeted generation. *(Block 5.)*
+# 3. **ML-PC Unit 10** (Automation in microscopy & characterization, the
+#    true calendar-W11 ML-PC lecture): an autonomous
+#    **acquire → model → decide → acquire** loop — active-learning /
+#    self-driving-lab style, with the deck's conformal automate/escalate
+#    decision rule. *(Block 5b.)*
 #
-# **Red thread:** *Week 9 read the latent space; today we write it.* The
-# encoder gave us geometry (Week 9). The decoder gives us samples (today).
-# Latent-space arithmetic from MG turns the embedding into a control
-# surface — pick a direction, decode, get a candidate with target
-# properties. MFML supplies the VAE/diffusion machinery; ML-PC frames the
-# inverse-design problem; MG shows that the same logic applies to
-# materials embeddings.
+# **Red thread:** *Week 9 read the latent space; today we use it three
+# ways.* MFML supplies the VAE/diffusion machinery to **generate**
+# candidates. MG supplies the discipline to **diagnose** whether a learned
+# embedding is actually doing work (probe before you trust). ML-PC closes
+# the loop: an embedding good enough to retrieve in is good enough to
+# **steer an autonomous experiment** — the self-driving-lab loop that
+# decides what to measure next.
 #
 # > **Pre-flight check.** This notebook **assumes** you have run
 # > `notebooks/week11_homework.py`. Block 1 picks up directly from your
@@ -32,13 +38,14 @@
 #
 # | Block | Min | Topic |
 # |------:|:---:|:------|
-# | 1 | ~6  | Recap from homework — VAE, ELBO, β trade-off |
-# | 2 | ~14 | Conditional VAE on Cahn–Hilliard — generation under target free energy |
-# | 3 | ~14 | Latent-space gradient descent — inverse design as differentiable optimization |
-# | 4 | ~14 | Flow matching — train tiny ODE-velocity U-Net; 10-step Heun sampling |
-# | 5 | ~14 | Materials latent-space arithmetic — stability axis on CGNN embeddings (MG W11) |
-# | 6 | ~10 | Honest limitations — mode collapse, posterior collapse, OOD generation |
-# | 7 | ~18 | Student exercises (3 core) |
+# | 1  | ~5  | Recap from homework — VAE, ELBO, β trade-off |
+# | 2  | ~12 | Conditional VAE on Cahn–Hilliard — generation under target free energy |
+# | 3  | ~12 | Latent-space gradient descent — inverse design as differentiable optimization |
+# | 4  | ~12 | Flow matching — train tiny ODE-velocity U-Net; 10-step Heun sampling |
+# | 5  | ~14 | Embedding diagnostics — linear probe vs random-init vs Magpie, retrieval, the t-SNE trap (MG W11) |
+# | 5b | ~12 | Self-driving-lab loop — autonomous acquire→model→decide, conformal escalate (ML-PC W11) |
+# | 6  | ~8  | Honest limitations — mode collapse, posterior collapse, OOD generation |
+# | 7  | ~15 | Student exercises (3 core) |
 
 # %%
 # Standard imports.
@@ -568,24 +575,43 @@ else:
 # distillation — generalises naturally to the flow-matching ODE.
 
 # %% [markdown]
-# # Block 5 — Materials latent-space arithmetic (MG W11)
+# # Block 5 — Embedding diagnostics (MG W11)
 #
 # We now switch from CH images to crystal embeddings — the MG home turf.
-# Goal: in the *learned* embedding space, find the **stability axis** —
-# the direction that most decreases the predicted formation energy — and
-# verify that walking along that axis really does decrease energy under
-# the GNN's own predictor head.
+# **But the true MG-W11 lecture is *not* latent-space arithmetic for
+# property targeting** (that is explicitly deferred to MG U12, "Generative
+# Models & Inverse Design"). MG-W11 is *Representation Learning & Feature
+# Discovery*, and its conceptual centre is a discipline, not a generator:
 #
-# This is the cleanest "latent-space arithmetic for property targeting"
-# demo and it does *not* need a decoder: we only ask "where in the latent
-# space do stable crystals live?" and walk in that direction. The
-# *decoder* would be a graph generator (out of scope today).
+# > *Probe before you project.* A learned embedding is only useful to the
+# > extent it contains information about the property you care about — and
+# > a pretty 2-D projection does **not** establish that.
 #
-# *(see MG §"Latent-space arithmetic for property targeting",
-# §"Composition-structure-property maps")*
+# We exercise the deck's diagnostic stack on a small TinyCGNN trained on
+# toy formation energies:
+#
+# 1. **Linear probe vs random-init baseline vs engineered features**
+#    (MG §F slide 42): freeze the encoder, fit a linear head on a
+#    *held-out prototype*, and compare against (i) a *random-init*
+#    encoder of the same architecture and (ii) a hand-engineered
+#    composition baseline (a Magpie-style stand-in). Without the
+#    random-init row you cannot tell whether *training* helped or whether
+#    the *architecture* did the work — "the most-omitted comparison in
+#    published work".
+# 2. **Nearest-neighbour retrieval** (MG §F slide 43): the diagnostic the
+#    deck trusts most — full-dimension, per-query, manually inspectable.
+# 3. **The "pretty t-SNE / dead downstream" trap** (MG §F slide 45):
+#    construct it on purpose — a PCA scatter that *looks* structured while
+#    a probe of a *metadata artefact* (prototype id / atom count) scores
+#    high and the *property* probe is comparatively weak.
+#
+# *(see MG §F "Diagnosing Learned Representations", slides 41–46;
+# §"Linear Probe Protocol"; §"Nearest-Neighbour Retrieval Check")*
 
 # %%
-# Train a fresh TinyCGNN (same as Week 6/9), extract embeddings, head, etc.
+# Train a fresh TinyCGNN (same backbone as Week 6/9): supervised on toy
+# formation energy.  We keep its `encode()` (frozen embedding) and `head`
+# for the probes below.
 class TinyCGNN(nn.Module):
     def __init__(self, n_elements=120, embed_dim=16, n_layers=3):
         super().__init__()
@@ -617,11 +643,41 @@ class TinyCGNN(nn.Module):
 
 cg = CrystalGraphsDataset()
 y_cg = cg.y; y_cg_mean = y_cg.mean().item(); y_cg_std = y_cg.std().item()
+y_true = cg.y                                              # 200 floats (property)
+prototype = cg.prototype                                   # 200 int (metadata)
 
+
+def cgnn_embeddings(model):
+    """Mean-pooled 16-D embedding for every crystal in `cg`."""
+    model.eval()
+    with torch.no_grad():
+        return torch.stack([
+            model.encode(cg[i]["species"], cg[i]["edge_index"],
+                         cg[i]["edge_distance"])
+            for i in range(len(cg))
+        ])                                                 # (200, 16)
+
+
+# Engineered "Magpie-style" composition baseline: per-crystal summary
+# statistics of atomic number (mean, std, min, max, n_atoms) — the kind
+# of cheap hand-crafted descriptor MG U6 builds and §F slide 42 makes the
+# probe compare against.
+def magpie_style_features():
+    feats = []
+    for i in range(len(cg)):
+        z = cg[i]["species"].float()
+        feats.append(torch.tensor([
+            z.mean(), z.std(unbiased=False), z.min(), z.max(),
+            float(z.numel()),
+        ]))
+    return torch.stack(feats)                              # (200, 5)
+
+
+# Train the supervised CGNN (this is our "pretrained" encoder).
 torch.manual_seed(0)
 cgnn = TinyCGNN()
 opt_g = torch.optim.Adam(cgnn.parameters(), lr=5e-3)
-print("Training TinyCGNN (5 epochs)...")
+print("Training TinyCGNN encoder (5 epochs, supervised on formation energy)...")
 for ep in range(5):
     cgnn.train()
     losses = []
@@ -638,98 +694,364 @@ for ep in range(5):
     if ep % 2 == 0 or ep == 4:
         print(f"  epoch {ep}  train MSE = {np.mean(losses):.4f}")
 
-cgnn.eval()
-with torch.no_grad():
-    embeds = torch.stack([
-        cgnn.encode(cg[i]["species"], cg[i]["edge_index"], cg[i]["edge_distance"])
-        for i in range(len(cg))
-    ])                                                     # (200, 16)
-    y_pred_all = torch.tensor([
-        cgnn(cg[i]["species"], cg[i]["edge_index"], cg[i]["edge_distance"]).item()
-        for i in range(len(cg))
-    ])
-    y_pred_all_de = y_pred_all * y_cg_std + y_cg_mean
+# A *random-init* encoder of the exact same architecture: never trained.
+# This is the MG §F slide-42 baseline that isolates "did pretraining help?"
+torch.manual_seed(1)
+cgnn_rand = TinyCGNN()
 
+emb_trained = cgnn_embeddings(cgnn)                        # (200, 16)
+emb_random = cgnn_embeddings(cgnn_rand)                    # (200, 16)
+feat_magpie = magpie_style_features()                      # (200, 5)
+
+
+# %% [markdown]
+# ## 5.1 — Linear probe on a held-out prototype
+#
+# **Protocol (MG §F slide 42).** Freeze each representation. Hold out one
+# *entire prototype* (here `perovskite`) — this is the deck's
+# *held-out-chemistry* requirement: a probe evaluated on the same
+# distribution it was fit on is a memorisation test, not a transfer test.
+# Fit a closed-form ridge-regression linear head on the other 4
+# prototypes, evaluate $R^2$ / MAE on the held-out one. Compare four
+# rows: trained encoder, random-init encoder, Magpie-style features, and
+# a raw-mean-atomic-number scalar (a deliberately weak floor).
 
 # %%
-# PCA-reduce embeddings to 2D for the visualisation.
+def linear_probe(Z, y, train_mask, test_mask, ridge=1.0):
+    """Closed-form ridge linear probe.  Returns (R2, MAE) on the test set.
+
+    Standardise features on the train split, append a bias, solve the
+    normal equations with an L2 penalty (no torch grad needed)."""
+    Z = Z.float()
+    mu = Z[train_mask].mean(0, keepdim=True)
+    sd = Z[train_mask].std(0, keepdim=True).clamp_min(1e-6)
+    Zs = (Z - mu) / sd
+    Ztr = torch.cat([Zs[train_mask], torch.ones(train_mask.sum(), 1)], dim=1)
+    Zte = torch.cat([Zs[test_mask], torch.ones(test_mask.sum(), 1)], dim=1)
+    ytr = y[train_mask].unsqueeze(1)
+    d = Ztr.shape[1]
+    reg = ridge * torch.eye(d); reg[-1, -1] = 0.0          # don't penalise bias
+    w = torch.linalg.solve(Ztr.T @ Ztr + reg, Ztr.T @ ytr)
+    yhat = (Zte @ w).squeeze(1)
+    yte = y[test_mask]
+    ss_res = ((yte - yhat) ** 2).sum()
+    ss_tot = ((yte - yte.mean()) ** 2).sum().clamp_min(1e-12)
+    r2 = (1 - ss_res / ss_tot).item()
+    mae = (yte - yhat).abs().mean().item()
+    return r2, mae
+
+
+held_out_proto = cg.prototype_names.index("perovskite")
+test_mask = (prototype == held_out_proto)
+train_mask = ~test_mask
+print(f"Held-out prototype: 'perovskite'  "
+      f"({int(test_mask.sum())} test / {int(train_mask.sum())} train crystals)")
+
+# A deliberately weak floor: a single per-crystal scalar (mean atomic
+# number).  Anything that cannot beat this is not a representation.
+floor_feat = torch.stack([cg[i]["species"].float().mean()
+                          for i in range(len(cg))]).unsqueeze(1)  # (200,1)
+
+probe_rows = [
+    ("trained CGNN encoder", emb_trained),
+    ("random-init CGNN encoder", emb_random),
+    ("Magpie-style features", feat_magpie),
+    ("mean-Z scalar (weak floor)", floor_feat),
+]
+print(f"\n{'representation':<30}  {'R2':>7}  {'MAE (eV/atom)':>14}")
+print("-" * 56)
+probe_results = {}
+for name, Z in probe_rows:
+    r2, mae = linear_probe(Z, y_true, train_mask, test_mask)
+    probe_results[name] = (r2, mae)
+    print(f"{name:<30}  {r2:7.3f}  {mae:14.3f}")
+
+
+# %% [markdown]
+# **Reading the probe table.** The row that matters most is **random-init
+# CGNN encoder**. If it scores close to the trained encoder, the
+# *architecture* (graph message passing + mean pooling) is doing the work
+# and the supervised training added little — exactly the "most-omitted
+# comparison" the MG deck (slide 42) insists on. The Magpie-style row is
+# the engineered baseline any learned embedding must *beat to justify its
+# cost* (MG §G slide 47). On this toy dataset the formation energy is
+# largely an electronegativity/radius-mismatch function of composition, so
+# expect the cheap composition features to be a *strong* baseline — the
+# deck's "always use the foundation model is wrong" point, measured.
+
+# %% [markdown]
+# ## 5.2 — Nearest-neighbour retrieval (the honest diagnostic)
+#
+# **Protocol (MG §F slide 43).** For each query crystal, retrieve its
+# $k$ nearest neighbours **in full embedding dimension** (no 2-D
+# projection) and ask: do the neighbours share the query's prototype, and
+# are their formation energies clustered near the query's? We report
+# `precision@k` for prototype and the mean absolute energy gap to the
+# query — the per-query, manually-inspectable diagnostic the deck trusts
+# more than any t-SNE.
+
+# %%
+def retrieval_metrics(Z, k=5):
+    """Mean prototype precision@k and mean |Δenergy| to query, full-dim."""
+    Z = F.normalize(Z.float(), dim=1)
+    sim = Z @ Z.T
+    sim.fill_diagonal_(-2.0)                                # exclude self
+    nn_idx = sim.topk(k, dim=1).indices                     # (N, k)
+    proto_hit = (prototype[nn_idx] == prototype[:, None]).float().mean().item()
+    e_gap = (y_true[nn_idx] - y_true[:, None]).abs().mean().item()
+    return proto_hit, e_gap
+
+
+print(f"{'representation':<30}  {'proto P@5':>10}  {'mean |ΔE| (eV/atom)':>20}")
+print("-" * 64)
+for name, Z in [("trained CGNN encoder", emb_trained),
+                ("random-init CGNN encoder", emb_random),
+                ("Magpie-style features", feat_magpie)]:
+    p_at_k, e_gap = retrieval_metrics(Z, k=5)
+    print(f"{name:<30}  {p_at_k:10.3f}  {e_gap:20.3f}")
+
+# A worked example: 1 query, its 5 nearest neighbours in the trained space.
+Zn = F.normalize(emb_trained, dim=1)
+q = 0
+sims = Zn @ Zn[q]; sims[q] = -2.0
+nn5 = sims.topk(5).indices
+print(f"\nQuery crystal {q}: prototype="
+      f"{cg.prototype_names[int(prototype[q])]}, E={y_true[q]:+.2f} eV/atom")
+for j in nn5.tolist():
+    print(f"  neighbour {j:3d}: "
+          f"prototype={cg.prototype_names[int(prototype[j])]:<10}  "
+          f"E={y_true[j]:+.2f}  (ΔE={abs(y_true[j]-y_true[q]):.2f})")
+
+
+# %% [markdown]
+# ## 5.3 — The "pretty t-SNE / dead downstream" trap
+#
+# **The anti-pattern (MG §F slide 45).** A 2-D projection can look
+# beautifully clustered while the embedding is *useless for the property*
+# — because the projection latches onto a high-variance **metadata
+# artefact**. The deck's canonical concrete example: "the embedding had
+# learned to *count atoms* — the cluster picture was by number of atoms in
+# the cell, and the property probe was at chance." We reproduce exactly
+# that: the artefact is **atom count per cell** (`n_atoms`), a real but
+# physically-irrelevant-to-stability quantity.
+#
+# We PCA-scatter the trained embedding (it *looks* structured), then put
+# two probes **on the same random split** side by side — a probe of
+# `n_atoms` (the metadata artefact) vs a probe of **formation energy**
+# (the property we actually want). The lesson lands when the artefact
+# probe scores high while the property probe is comparatively weak: the
+# projection organised the embedding by the artefact, not the property.
+
+# %%
 def pca_2d(X):
+    X = X.float()
     mu = X.mean(0, keepdim=True)
     Xc = X - mu
     cov = Xc.T @ Xc / (Xc.shape[0] - 1)
     eigvals, eigvecs = torch.linalg.eigh(cov)
     order = torch.argsort(eigvals, descending=True)
     V = eigvecs[:, order][:, :2]
-    return Xc @ V, V, mu
-
-Z2, V2, mu_e = pca_2d(embeds)
-
-# Find the "stability axis": linear regression of (true) formation energy
-# on PCA-2D coordinates.  The negative of the regression gradient direction
-# is the steepest-descent axis for energy.
-y_true = cg.y                                              # 200 floats
-A = torch.cat([Z2, torch.ones(Z2.shape[0], 1)], dim=1)     # (200, 3)
-w, *_ = torch.linalg.lstsq(A, y_true.unsqueeze(1))
-coeffs = w[:2, 0]                                          # (2,) gradient in PCA-2D
-print(f"Stability axis in PCA-2D: ({coeffs[0]:+.3f}, {coeffs[1]:+.3f})")
-descent_dir = -coeffs / coeffs.norm()
-print(f"Steepest-descent direction (unit vector): ({descent_dir[0]:+.3f}, {descent_dir[1]:+.3f})")
+    return Xc @ V
 
 
-# %%
-# Pick a starting crystal and walk along the stability axis in 2D.  At
-# each step, build the corresponding 16-D embedding (just project back),
-# pass through the head, get the predicted energy.
-i_start = int((y_true.argsort()[100]).item())              # roughly median-energy crystal
-n_steps = 8; step_size = 1.0
-walk_2d = torch.stack([
-    Z2[i_start] + (k - n_steps // 2) * step_size * descent_dir
-    for k in range(n_steps)
-])                                                         # (n_steps, 2)
-# Lift back to 16-D: e_full = mu + Z @ V_2d^T  (only the 2D coords are
-# changed; we keep the residual orthogonal-component fixed).
-e_start = embeds[i_start]
-residual = e_start - mu_e[0] - Z2[i_start] @ V2.T
-walk_16d = mu_e[0] + walk_2d @ V2.T + residual
+Z2 = pca_2d(emb_trained)                                    # (200, 2)
 
-cgnn.eval()
-with torch.no_grad():
-    walk_y_pred_n = cgnn.head(walk_16d).squeeze(-1)
-walk_y_pred = walk_y_pred_n * y_cg_std + y_cg_mean
+# The metadata artefact: number of atoms in the cell — real, but
+# physically irrelevant to formation energy.  Probe it vs the property on
+# the SAME random 75/25 split (both targets are in-distribution here; the
+# point is "same embedding, same split, artefact wins").
+n_atoms = torch.tensor([float(cg[i]["species"].numel())
+                        for i in range(len(cg))])
+g_split = torch.Generator().manual_seed(0)
+perm_e = torch.randperm(len(cg), generator=g_split)
+n_tr_e = int(0.75 * len(cg))
+rand_train = torch.zeros(len(cg), dtype=torch.bool)
+rand_train[perm_e[:n_tr_e]] = True
+rand_test = ~rand_train
 
-# Sanity check: walking along descent_dir should decrease the predicted energy.
+r2_artefact, _ = linear_probe(emb_trained, n_atoms, rand_train, rand_test)
+r2_property, _ = linear_probe(emb_trained, y_true, rand_train, rand_test)
+print(f"trained-embedding probe (random split):  "
+      f"n_atoms artefact R2 = {r2_artefact:.3f}   "
+      f"formation-energy R2 = {r2_property:.3f}")
+
 fig, (a1, a2) = plt.subplots(1, 2, figsize=(11, 4.4))
-for p_idx, pname in enumerate(cg.prototype_names):
-    m = (cg.prototype == p_idx).numpy()
-    a1.scatter(Z2[m, 0], Z2[m, 1], s=18, alpha=0.6, c=f"C{p_idx}", label=pname)
-a1.scatter(walk_2d[:, 0], walk_2d[:, 1], s=80, marker="o", facecolor="none",
-           edgecolor="k", lw=1.4, label="latent walk")
-a1.scatter([Z2[i_start, 0]], [Z2[i_start, 1]], s=120, marker="*",
-           c="red", label=f"start (idx {i_start})")
+sc = a1.scatter(Z2[:, 0], Z2[:, 1], s=20, alpha=0.7,
+                c=n_atoms.numpy(), cmap="viridis")
 a1.set_xlabel("embed PC1"); a1.set_ylabel("embed PC2")
-a1.set_title("Walk along the stability axis"); a1.legend(fontsize=8)
+a1.set_title("PCA of the embedding — looks structured\n(coloured by atom count)")
+fig.colorbar(sc, ax=a1, label="n_atoms")
 
-a2.plot(walk_y_pred.numpy(), "o-", lw=1.6)
-a2.set_xlabel("step along descent_dir"); a2.set_ylabel("predicted formation energy (eV/atom)")
-a2.axhline(float(y_true[i_start]), ls=":", c="grey",
-           label=f"true energy of start = {y_true[i_start]:.2f}")
-a2.set_title("Predicted energy decreases along the stability axis")
-a2.legend(fontsize=9); plt.tight_layout(); plt.show()
+a2.bar(["metadata\n(n_atoms)", "property\n(formation E)"],
+       [r2_artefact, r2_property], color=["C3", "C0"])
+a2.axhline(0.0, c="grey", lw=0.8)
+a2.set_ylabel("held-out probe $R^2$")
+a2.set_title("Probe the projection, don't trust it")
+for i, v in enumerate([r2_artefact, r2_property]):
+    a2.text(i, v + 0.02 * (1 if v >= 0 else -1), f"{v:.2f}",
+            ha="center", fontsize=10)
+plt.tight_layout(); plt.show()
 
 
 # %% [markdown]
-# **Reading the latent walk.** Two observations:
+# **Reading the trap.** The left scatter *looks* like the embedding "knows
+# something" — and the colour reveals what: the structure tracks
+# **atom count**, not stability. The right panel is the honest verdict:
+# the metadata-artefact probe (`n_atoms`) scores high while the property
+# probe (formation energy) is comparatively weak — the projection
+# organised the embedding by *how big the cell is*, not by *how stable*
+# the crystal is. A downstream inverse-design or discovery pipeline built
+# on a "pretty t-SNE" alone would inherit exactly this blind spot.
+# **Probe before you project** is the single transferable discipline of
+# MG-W11. (If on this toy dataset the property probe is *also* strong,
+# that is the §F46 "good downstream, bad t-SNE" mirror image — still the
+# same lesson: trust the probe, not the picture.)
+
+# %% [markdown]
+# # Block 5b — The self-driving-lab loop (ML-PC W11)
 #
-# 1. The walk crosses prototype clusters (left panel). The stability axis
-#    in the embedding tracks a direction that mixes prototype identity
-#    with chemistry — **stability is a multi-axis property**, and the
-#    embedding has captured both.
-# 2. The predicted energy decreases monotonically (right panel). This is
-#    the inverse-design payoff: if we had a *decoder GNN* (a model that
-#    turns a 16-D vector back into a crystal graph), this walk would give
-#    us a sequence of progressively-more-stable candidate crystals to
-#    propose for synthesis. Decoding crystal graphs is the active research
-#    frontier — papers like CDVAE and DiffCSP do exactly this.
+# The true calendar-W11 ML-PC lecture is **Unit 10 — Automation in
+# microscopy & characterization**, not inverse problems. Its spine is the
+# *self-driving lab*: an agent that **defines an objective** ("find the
+# most stable composition") instead of issuing commands, and runs an
+# autonomous
+#
+# > **acquire → model → decide → acquire** loop
+#
+# until the objective is met or the budget is spent. The deck frames this
+# as RL / active experimentation with a reward signal, plus a discipline
+# for *when to hand back to a human* (conformal "emit a set, not a
+# label").
+#
+# We make this concrete and cheap by reusing the **embedding from Block
+# 5** as the lab's state representation — closing the deck's own forward
+# link ("retrieval ... generalises directly to the discovery loop", MG
+# §F slide 43; ML-PC §"Self-Driving Lab Framework"). The "instrument" is
+# the toy formation-energy oracle `cg.y`; "measuring" a crystal is
+# expensive, so the agent may only query a small budget. Active-learning
+# loop:
+#
+# 1. **Model.** Fit a cheap linear surrogate on all crystals measured so
+#    far (state = frozen CGNN embedding).
+# 2. **Decide.** Score every *unmeasured* crystal by an acquisition
+#    function (expected improvement-style: predicted stability minus an
+#    uncertainty-aware exploration bonus from k-NN embedding distance).
+# 3. **Acquire.** "Measure" the top candidate (reveal its true energy),
+#    add it to the labelled pool, loop.
+# 4. **Escalate.** A conformal-style calibrated band decides
+#    automate-vs-escalate: a *wide* prediction band → the surrogate is
+#    unsure → flag for the (simulated) human operator instead of
+#    auto-accepting.
+#
+# *(see ML-PC §"The Self-Driving Lab Framework", §"Reinforcement Learning
+# Foundations" (state/action/reward), §"Conformal Classification — emit
+# prediction sets, not single labels")*
+
+# %%
+# State = frozen Block-5 trained embedding.  Goal: find the most stable
+# (lowest formation-energy) crystal under a tight measurement budget,
+# without measuring all 200.
+emb_state = F.normalize(emb_trained, dim=1)                 # (200, 16) frozen
+energy_oracle = y_true                                       # "instrument": expensive
+N = emb_state.shape[0]
+
+rng = np.random.default_rng(0)
+budget = 30
+n_seed = 5
+
+measured = list(rng.choice(N, size=n_seed, replace=False))
+measured = [int(i) for i in measured]
+best_energy_trace = []
+escalations = 0
+
+for step in range(budget - n_seed):
+    idx_m = torch.tensor(measured)
+    Zm = emb_state[idx_m]
+    ym = energy_oracle[idx_m]
+
+    # --- Model: closed-form ridge surrogate on measured crystals ---
+    A = torch.cat([Zm, torch.ones(len(measured), 1)], dim=1)
+    d = A.shape[1]
+    reg = 1.0 * torch.eye(d); reg[-1, -1] = 0.0
+    w = torch.linalg.solve(A.T @ A + reg, A.T @ ym.unsqueeze(1))
+    resid = (A @ w).squeeze(1) - ym
+    sigma = resid.std(unbiased=False).clamp_min(1e-3)        # surrogate noise
+
+    # --- Decide: acquisition over unmeasured crystals ---
+    unmeasured = [i for i in range(N) if i not in measured]
+    Zu = emb_state[unmeasured]
+    pred = (torch.cat([Zu, torch.ones(len(unmeasured), 1)], dim=1) @ w).squeeze(1)
+    # exploration bonus: distance to the nearest measured crystal in
+    # embedding space (far-from-known => uncertain => worth probing)
+    nn_dist = torch.cdist(Zu, Zm).min(dim=1).values
+    # we MINIMISE energy, so acquisition = -pred + kappa * novelty
+    kappa = 1.5
+    acq = -pred + kappa * nn_dist
+    pick_local = int(acq.argmax().item())
+    pick = unmeasured[pick_local]
+
+    # --- Escalate: conformal-style calibrated band on the surrogate ---
+    # band half-width from the measured-residual quantile (alpha=0.1)
+    q = torch.quantile(resid.abs(), 0.90)
+    band = float(q.item())
+    if band > 1.5 * float(sigma.item()):
+        escalations += 1                                     # "send to operator"
+
+    # --- Acquire: reveal the true energy, add to pool ---
+    measured.append(pick)
+    best_energy_trace.append(float(energy_oracle[torch.tensor(measured)].min().item()))
+
+best_idx = int(energy_oracle[torch.tensor(measured)].argmin().item())
+best_crystal = measured[int(np.argmin([energy_oracle[m].item() for m in measured]))]
+global_best = float(energy_oracle.min().item())
+found_best = best_energy_trace[-1]
+print(f"Budget: {budget} measurements out of {N} crystals "
+      f"({100*budget/N:.0f}% of the library).")
+print(f"Global optimum (full enumeration, NOT given to agent): "
+      f"{global_best:+.3f} eV/atom")
+print(f"Best found by the loop: {found_best:+.3f} eV/atom")
+print(f"Operator escalations (conformal band too wide): {escalations}")
+
+# Baseline: random acquisition of the same budget, averaged over seeds.
+rand_best = []
+for s in range(20):
+    r = np.random.default_rng(100 + s)
+    sample = r.choice(N, size=budget, replace=False)
+    rand_best.append(float(energy_oracle[torch.tensor(sample)].min().item()))
+rand_mean = float(np.mean(rand_best))
+print(f"Random-acquisition baseline (same budget, mean of 20): "
+      f"{rand_mean:+.3f} eV/atom")
+
+fig, ax = plt.subplots(figsize=(7, 4))
+xs = range(n_seed + 1, budget + 1)
+ax.plot(xs, best_energy_trace, "o-", lw=1.6, label="self-driving-lab loop")
+ax.axhline(global_best, ls="--", c="green", label="global optimum (hidden)")
+ax.axhline(rand_mean, ls=":", c="grey",
+           label=f"random acquisition (mean, n={budget})")
+ax.set_xlabel("# crystals measured")
+ax.set_ylabel("best formation energy found (eV/atom)")
+ax.set_title("Autonomous acquire→model→decide loop on CGNN embeddings")
+ax.legend(fontsize=9); plt.tight_layout(); plt.show()
+
+
+# %% [markdown]
+# **Reading the loop.** The agent never sees the full library; it spends a
+# fixed measurement budget and the active-learning acquisition (exploit
+# the surrogate's stability prediction, explore where the embedding is
+# sparse) drives the best-found energy down **faster than random
+# acquisition** — the self-driving-lab payoff. The conformal-style band is
+# the deck's automate-vs-escalate discipline: when the surrogate's
+# calibrated band is wide relative to its noise, the step is *escalated*
+# to a human rather than silently auto-accepted. This is the same
+# "measure, don't assert; refuse when unsure" honesty as Block 6 — here
+# applied to *which experiment to run next* instead of *which sample to
+# trust*.
+#
+# **Why this braids cleanly.** The state representation is the *frozen
+# Block-5 embedding*: an embedding good enough to retrieve in (Block 5.2)
+# is good enough to *steer an autonomous experiment*. MG diagnoses the
+# representation; ML-PC puts the diagnosed representation in a closed
+# control loop. That is the W11 triad's actual through-line.
 
 # %% [markdown]
 # # Block 6 — Honest limitations
@@ -789,7 +1111,7 @@ plt.tight_layout(); plt.show()
 # advertise OOD candidates as valid.
 
 # %% [markdown]
-# # Block 7 — Student exercises (~18 min)
+# # Block 7 — Student exercises (~15 min)
 
 # %% [markdown]
 # ## Exercise 1 (core) — Diversity-vs-accuracy in CVAE generation
@@ -827,23 +1149,33 @@ plt.tight_layout(); plt.show()
 # method's *failure signal* is louder.
 
 # %% [markdown]
-# ## Exercise 3 (core) — The stability axis on a held-out prototype
+# ## Exercise 3 (core) — Does pretraining actually help? The probe verdict
 #
-# **Setup.** In Block 5 you fit the stability regression using all 5
-# prototypes' embeddings. The natural follow-up: does that same stability
-# axis still work when you didn't train it on the prototype you walk
-# from?
+# **Setup.** Block 5.1 produced a four-row probe table on a *single*
+# held-out prototype (`perovskite`). The MG deck (§F slide 42) insists the
+# **random-init row** is the comparison that decides whether *training*
+# contributed or whether the *architecture* did the work — and it warns
+# that a single split can mislead.
 #
-# **Task.** Pick one prototype (say `perovskite`). Refit the
-# 2-coefficient regression in Block 5 *only* on the embeddings of the
-# other 4 prototypes. Use that regression's descent direction to walk
-# along starting from a perovskite crystal. Does the GNN's predicted
-# energy still decrease along the walk?
+# **Task.** Turn the single split into a verdict:
 #
-# **Expected:** if the embedding's "stability geometry" is consistent
-# across prototypes, yes — and that means the latent-space arithmetic
-# generalises. If not, you've found a structural bias in the embedding
-# that any inverse-design pipeline built on it would inherit.
+# 1. Loop over all 5 prototypes as the held-out set in turn (reuse
+#    `linear_probe`, `emb_trained`, `emb_random`, `feat_magpie`). For each
+#    fold record $R^2$ for the trained encoder, the random-init encoder,
+#    and the Magpie-style baseline.
+# 2. Report the mean ± std $R^2$ across the 5 folds for each
+#    representation.
+# 3. Answer in one sentence: on this dataset, did the *supervised
+#    training* of the CGNN buy a meaningful probe improvement over the
+#    *random-init* architecture, and does either beat the engineered
+#    Magpie-style baseline?
+#
+# **Expected.** If trained ≈ random-init, the message-passing
+# architecture (not the training) carries the signal — exactly the
+# "most-omitted comparison" the deck builds §F around. If the Magpie-style
+# row is competitive, you have measured the deck's "always use the
+# foundation model is wrong" claim (MG §G slide 47) on real numbers, not
+# a slide.
 
 # %% [markdown]
 # ## Exercise 5 (stretch, optional) — Consistency distillation
@@ -923,8 +1255,12 @@ plt.tight_layout(); plt.show()
 # ---
 # **Bridge to Week 12.** Next week MFML moves to *uncertainty
 # quantification* (Gaussian processes, MC dropout, ensembles; the
-# split-conformal primer was already introduced in MFML Unit 7) and
-# ML-PC pairs that with *uncertainty-aware discovery loops*. The
-# discipline this week — measuring achieved properties, refusing OOD
-# candidates, watching for posterior collapse — is the prerequisite for
-# *honest* discovery.
+# split-conformal primer was already introduced in MFML Unit 7), MG U12
+# turns the *diagnosed* embedding of this week into a *generative*
+# inverse-design pipeline (MatterGen / DiffCSP / FlowMM operate on
+# exactly the kind of representation Block 5 just verified), and ML-PC
+# pairs both with *uncertainty-aware discovery loops* — the conformal
+# escalate rule of Block 5b promoted from a guardrail to the steering
+# signal. The discipline this week — probe before you project, measure
+# achieved properties, refuse OOD candidates, escalate when the
+# calibrated band is wide — is the prerequisite for *honest* discovery.

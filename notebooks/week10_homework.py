@@ -1,31 +1,40 @@
 # %% [markdown]
 # # Week 10 — Homework (do BEFORE the Thursday exercise)
 #
-# This week braids three lectures' Week 10 content onto one mechanism:
-# **scaled dot-product attention**. We build it from scratch on a toy 1D
-# signal, apply it to Ising microstructure patches, then extend it to
-# multi-head — *exactly* the building blocks Thursday will assemble into
-# a tiny ViT.
+# This week braids three lectures' Week 10 content. The attention spine
+# (Parts A-C) builds **scaled dot-product attention** from scratch on a
+# toy 1D signal, applies it to Ising microstructure patches, then extends
+# it to multi-head — *exactly* the building blocks Thursday will assemble
+# into a tiny ViT. Part D primes the second materials thread Thursday
+# develops: crystals as **graphs of atoms**, not vectors.
 #
 # 1. **MFML Unit 10** — Attention & Transformers. Self-attention,
 #    multi-head, positional encoding, the transformer block, ViT.
-# 2. **MG Week 10** — Representation learning and feature discovery.
-#    Engineered vs learned features; transferability.
+#    (Parts A-C.)
+# 2. **MG Unit 9** — Neural Networks for Materials Properties. A crystal
+#    is a graph of atoms under periodic boundary conditions with four
+#    symmetries (translation, rotation, permutation, periodicity); a
+#    generic vector model is blind to most of that structure. Part D is
+#    light prep for the from-scratch SchNet/CGCNN crystal-graph GNN
+#    Thursday builds (main notebook Block 5/6).
 # 3. **ML-PC parallel-track this week.** Unit 9b (Transformers for
 #    Materials) is the natural pair for this homework. ML-PC Unit 10
 #    (Automation in microscopy) is the calendar-W10 lecture but uses
 #    different material; we keep this homework on attention/ViT and apply
 #    the same machinery to 1D sequences of intensities (Thursday Block 7).
 #
-# **Red thread.** *Self-attention does not care whether its tokens are
-# image patches, spectral channels, or atoms in a crystal — the same
+# **Red thread.** *A neural network's job is to respect the structure of
+# its input. Self-attention does not care whether its tokens are image
+# patches or spectral channels — the same
 # $\mathrm{softmax}(QK^\top/\sqrt{d_k})V$ operation builds a representation
-# from any sequence of tokens. Today's homework writes that operation in
-# raw NumPy/PyTorch on a toy signal you can read off the page, then
-# applies it to 16-patch Ising images so Thursday can stack it into a
-# transformer block.*
+# from any sequence of tokens (Parts A-C). But an unordered set of atoms
+# in a crystal is a different object: there permutation-invariant
+# aggregation (sum/mean over atoms) is the **correct** symmetry, and a
+# composition-only vector cannot tell two polymorphs apart. Part D makes
+# that failure concrete so Thursday's crystal-graph GNN has a target to
+# beat.*
 #
-# **Time:** ~75 minutes.
+# **Time:** ~90 minutes.
 #
 # ## What this homework is
 #
@@ -34,7 +43,8 @@
 # | A | 20 | Scaled dot-product attention from scratch on a toy 1D sequence | MFML §"Self-attention formula" |
 # | B | 25 | Patchify Ising-light → 16 tokens; single-head attention over patches | MFML §"Image as a sequence of patches" |
 # | C | 20 | Multi-head attention from scratch: H=4 heads, concat + project | MFML §"Multi-head attention" |
-# | D | 10 | Reflection — attention vs convolution: what does each have built-in? | bridge to Thursday |
+# | D | 15 | MG-U9 prep — a crystal is a graph; composition-blindness; permutation-invariant pooling | MG-U9 §B/§07/§08/§11 |
+# | E | 10 | Reflection — attention vs convolution: what does each have built-in? | bridge to Thursday |
 #
 # ## What you must hand in (or be able to show on Thursday)
 #
@@ -45,7 +55,10 @@
 #    (clustered domains).
 # 3. **Part C:** a 4-panel grid of attention maps from the four heads on
 #    the same Ising sample.
-# 4. **Part D:** your written reflection paragraph (4-6 sentences).
+# 4. **Part D:** the printed composition-collision check (two prototypes,
+#    one Magpie vector) and the printed sum/mean pooling cell-doubling
+#    table — the two numbers Thursday's GNN must respect.
+# 5. **Part E:** your written reflection paragraph (4-6 sentences).
 
 # %%
 # Standard imports for the whole homework.
@@ -55,7 +68,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
 
-from ai4mat.datasets import IsingDataset
+from ai4mat.datasets import IsingDataset, CrystalGraphsDataset
 
 np.random.seed(0)
 torch.manual_seed(0)
@@ -373,7 +386,172 @@ plt.show()
 
 
 # %% [markdown]
-# # Part D — Reflection: attention vs convolution
+# # Part D — MG-U9 prep: a crystal is a graph, not a vector
+#
+# Parts A-C lived entirely in MFML's world: tokens, attention, images.
+# Thursday's second thread is **MG Unit 9 — Neural Networks for
+# Materials Properties**, where the input is no longer an image but an
+# **atomic system**. The single idea MG-U9 starts from:
+#
+# > A crystal is **not a vector and not an image**. It is a graph of
+# > atoms under periodic boundary conditions, with four symmetries the
+# > network must respect: translation, rotation, **permutation**, and
+# > periodicity (MG-U9 §08).
+#
+# This part is *light scaffolding* — no training, no GNN yet. You just
+# load the crystal-graph dataset Thursday uses, and reproduce **two**
+# load-bearing MG-U9 facts numerically so the main-notebook GNN (Block
+# 5/6) has a concrete target to beat:
+#
+# 1. **The MLP-on-Magpie failure (MG-U9 §07).** A composition-only
+#    feature vector cannot distinguish two polymorphs with the same
+#    chemistry — the diamond-vs-graphite wall.
+# 2. **Sum (extensive) vs mean (intensive) pooling (MG-U9 §11).**
+#    Permutation-invariant aggregation over atoms is the *correct*
+#    materials symmetry, but choosing sum vs mean is a physics decision:
+#    pick the wrong one and the model silently breaks across cell sizes.
+
+# %%
+# A crystal graph: per-atom atomic numbers Z, plus distance-labelled
+# edges. No grid, no fixed length — every crystal has a different atom
+# count. This is the data type every model in MG-U9 consumes.
+cg = CrystalGraphsDataset(n_total=200, seed=0)
+print(f"Part D — CrystalGraphsDataset: {len(cg)} crystals, "
+      f"prototypes {cg.prototype_names}")
+print(f"  formation-energy range = [{cg.y.min():.3f}, {cg.y.max():.3f}] eV/atom")
+print(f"  example crystal 0: {len(cg.species[0])} atoms, "
+      f"Z = {cg.species[0].tolist()}, "
+      f"{cg.edge_index[0].shape[1]} directed edges")
+print(f"  -> variable atom count per crystal: this is a *graph*, not a "
+      f"fixed-length vector.")
+
+
+# %% [markdown]
+# ### Part D.1 — Composition is not enough (the MG-U9 §07 wall)
+#
+# A "Magpie-style" baseline turns a crystal into a fixed vector of
+# pooled *elemental* statistics (mean/std/min/max of electronegativity
+# and covalent radius, plus atom count). It is blind to structure by
+# construction. The dataset contains pairs of crystals with **identical
+# composition but different prototypes** (e.g. rocksalt vs zincblende
+# SnSe) — the toy analogue of diamond vs graphite. Their Magpie vectors
+# are *bitwise identical*, yet their formation energies differ. No model
+# fed only that vector can ever tell them apart.
+
+# %%
+from ai4mat.datasets.crystal_graphs import _ELECTRONEGATIVITY, _RADIUS
+
+
+def magpie_vector(species) -> np.ndarray:
+    """Pooled elemental statistics — the Magpie recipe in miniature."""
+    chi = np.array([_ELECTRONEGATIVITY[int(z)] for z in species.tolist()])
+    rad = np.array([_RADIUS[int(z)] for z in species.tolist()])
+    return np.array([chi.mean(), chi.std(), chi.min(), chi.max(),
+                     rad.mean(), rad.std(), rad.min(), rad.max(),
+                     float(len(species))], dtype=np.float32)
+
+
+# Search for two crystals with the same atom multiset but different
+# prototypes (we do not hard-code indices — find them honestly).
+by_composition = {}
+collision = None
+for i in range(len(cg)):
+    key = tuple(sorted(cg.species[i].tolist()))
+    proto_i = int(cg.prototype[i])
+    if key in by_composition and by_composition[key][1] != proto_i:
+        collision = (by_composition[key][0], i)
+        break
+    by_composition.setdefault(key, (i, proto_i))
+
+assert collision is not None, "expected a same-composition prototype collision"
+a, b = collision
+v_a, v_b = magpie_vector(cg.species[a]), magpie_vector(cg.species[b])
+print(f"Part D.1 — composition collision: crystals {a} and {b}")
+print(f"  crystal {a}: prototype '{cg.prototype_names[int(cg.prototype[a])]}', "
+      f"Ef = {cg.y[a]:.4f} eV/atom")
+print(f"  crystal {b}: prototype '{cg.prototype_names[int(cg.prototype[b])]}', "
+      f"Ef = {cg.y[b]:.4f} eV/atom")
+print(f"  same atom multiset?         {sorted(cg.species[a].tolist()) == sorted(cg.species[b].tolist())}")
+print(f"  Magpie vectors identical?   {np.allclose(v_a, v_b)}   "
+      f"<- the model's *entire* input is the same")
+print(f"  but |Ef(a) - Ef(b)|         = {abs(cg.y[a] - cg.y[b]):.4f} eV/atom   "
+      f"<- the targets are NOT")
+print(f"  => a composition-only model is blind to the prototype "
+      f"(MG-U9 §07,\n     the diamond-vs-graphite wall). Only a "
+      f"structure-aware model can win.")
+
+
+# %% [markdown]
+# ### Part D.2 — Permutation invariance, and sum vs mean pooling
+#
+# A GNN turns each atom into a feature vector, then **aggregates over
+# atoms** to get one crystal-level number. That aggregation must be
+# *symmetric* — relabelling the atoms cannot change the prediction
+# (MG-U9 §08, symmetry 3; §11). Sum and mean are both permutation
+# invariant, but they behave differently when the cell is doubled:
+#
+# - **Mean** is *intensive*: invariant under cell doubling. Correct for
+#   per-atom formation energy, band gap, density of states.
+# - **Sum** is *extensive*: doubles under cell doubling. Correct for
+#   *total* energy, total magnetisation.
+#
+# We do not have a trained network yet, so we test the pooling rule
+# directly on a stand-in per-atom feature (here: each atom's
+# electronegativity). Doubling the cell must leave the *mean* unchanged
+# and roughly *double* the *sum*. This is the exact invariant Thursday's
+# GNN readout has to get right (main notebook Block 6).
+
+# %%
+def per_atom_feature(species) -> np.ndarray:
+    """Stand-in for a learned per-atom embedding: one scalar per atom."""
+    return np.array([_ELECTRONEGATIVITY[int(z)] for z in species.tolist()])
+
+
+sp = cg.species[a]
+feat = per_atom_feature(sp)
+feat_2x = np.concatenate([feat, feat])          # the 2x supercell: atoms duplicated
+
+sum_cell, sum_2x = feat.sum(), feat_2x.sum()
+mean_cell, mean_2x = feat.mean(), feat_2x.mean()
+
+# Permutation check: shuffle the atom order, both poolings must not move.
+rng = np.random.default_rng(0)
+feat_perm = feat[rng.permutation(len(feat))]
+
+print(f"Part D.2 — pooling a per-atom feature over crystal {a} "
+      f"({len(sp)} atoms):")
+print(f"  {'pooling':<14} {'unit cell':>12} {'2x supercell':>14} {'drift':>10}")
+print(f"  {'mean (intensive)':<14} {mean_cell:>12.4f} {mean_2x:>14.4f} "
+      f"{abs(mean_2x - mean_cell):>10.2e}")
+print(f"  {'sum  (extensive)':<14} {sum_cell:>12.4f} {sum_2x:>14.4f} "
+      f"{abs(sum_2x - sum_cell):>10.2e}")
+print(f"  permutation check (must be ~0): "
+      f"|mean - mean(shuffled)| = {abs(feat.mean() - feat_perm.mean()):.2e}, "
+      f"|sum - sum(shuffled)| = {abs(feat.sum() - feat_perm.sum()):.2e}")
+print(f"  => both poolings are permutation invariant; only *mean* is "
+      f"invariant\n     under cell doubling. For per-atom formation "
+      f"energy, mean is correct\n     (MG-U9 §11). Picking sum here "
+      f"silently breaks cell-size transfer.")
+
+
+# %% [markdown]
+# **Part D deliverable:** the two printed blocks above —
+#
+# 1. the composition-collision check (same Magpie vector, different
+#    formation energy), and
+# 2. the sum-vs-mean cell-doubling table (mean invariant, sum doubles,
+#    both permutation invariant).
+#
+# These are the two numbers Thursday's from-scratch crystal-graph GNN
+# (main notebook Block 5/6) must respect: it must beat the
+# composition-only baseline (because it sees structure), and it must use
+# **mean** pooling so the per-atom energy stays invariant under cell
+# doubling. You are not asked to build the GNN here — only to understand
+# why a plain vector model cannot, and what symmetry the pooling encodes.
+
+
+# %% [markdown]
+# # Part E — Reflection: attention vs convolution
 #
 # A convolutional layer has *locality* and *translation equivariance*
 # baked in: a 3×3 kernel always looks at a 3×3 neighbourhood, and the
@@ -389,8 +567,9 @@ plt.show()
 #
 # - Microstructure image classification (Ising / Cahn-Hilliard) vs
 #   spectral classification (XRD / EELS).
-# - Crystal-structure property prediction (graph of atoms) vs sequence
-#   prediction in linguistics.
+# - Crystal-structure property prediction (graph of atoms, Part D) vs
+#   sequence prediction in linguistics. (Hint: which of the four MG-U9
+#   symmetries does each architecture get for free?)
 # - Microscopy denoising (lots of pixels, lots of training data) vs
 #   property prediction (few hundred materials).
 #

@@ -39,6 +39,7 @@
 # |------:|:---:|:------|
 # | 1 |  6 | Recap from homework |
 # | 2 | 14 | KernelSHAP from scratch on a tensile regression model |
+# | 2b | 10 | The confounder trap — faithful-to-model ≠ true-of-world |
 # | 3 | 12 | Sparse autoencoder on Ising-CNN activations — mechanistic interp. |
 # | 4 | 14 | Counterfactuals via gradient descent on the input |
 # | 5 | 12 | Symmetry audit on the Ising CNN; fix with test-time augmentation |
@@ -316,6 +317,268 @@ plt.show()
 # - Sum of $\varphi_i$ matches $f(x) - f(\text{background})$ — the
 #   efficiency axiom holds (modulo a small numerical correction
 #   applied at the end of `kernel_shap`).
+
+
+# %% [markdown]
+# ## Block 2b — The confounder trap: SHAP is faithful-to-model, not true-of-world
+#
+# *MFML §9 conceptual climax + ML-PC "causality in the process
+# chain" — one block, both lectures.*
+#
+# Block 2's soundness check rested on a quiet assumption: that a
+# feature with **no causal link to the target** attributes to ~0.
+# That is only true if the feature is also *uncorrelated with the
+# real causes*. In a real lab it almost never is. Samples are made in
+# **campaigns**: a furnace, a powder lot, a measurement session. A
+# `furnace_id`-style column does not *cause* strength — yet if hotter
+# campaigns happened to run on furnace B, `furnace_id` is correlated
+# with $T$, and a model will happily route prediction through it.
+#
+# This is the **process-chain causality** point: composition →
+# processing → microstructure → properties is the *causal* graph, but
+# the *recorded* table also carries campaign metadata that is merely
+# **correlated** with the causal path. A model that maximises accuracy
+# does not know the difference. SHAP, faithfully, will report whatever
+# the model actually used — **faithful-to-model is not
+# true-of-world**.
+#
+# Construction (exactly the TODO's recipe): take the same tensile
+# task and replace the inert `noise` column with a synthetic
+# **`furnace_id`** — the logged processing campaign. The campaign was
+# scheduled by temperature, so `furnace_id` is a *near-deterministic*
+# function of $T$. Crucially, the **logged campaign ID is exact**,
+# whereas the recorded `T_norm` carries **thermocouple measurement
+# noise** (as in a real lab). That gives the model a genuine reason to
+# route the temperature signal through the *cleaner* confounder —
+# which is exactly how confounders sneak into production models. It is
+# still **causally inert**: `y` is generated only by the
+# `TensileTestDataset` physics, which never sees `furnace_id`. We then:
+#
+# 1. train an MLP that reaches **good accuracy partly via the
+#    confounder**,
+# 2. show **SHAP attributes real importance to `furnace_id`**,
+# 3. run **two diagnostics that expose the spurious dependence** —
+#    permutation importance (predictive, observational) and a
+#    **controlled intervention** (`do(furnace_id)`: resample the
+#    confounder *independently* of $T$, breaking the back-door path),
+# 4. read off the correlation-vs-causation moral.
+
+# %%
+# Build the confounded feature matrix: feature 5 is now `furnace_id`
+# instead of pure noise, and the recorded `T_norm` (feature 1) is now
+# a *noisy* thermocouple reading. furnace_id is the exact logged
+# campaign -> a strong, clean *statistical* proxy for the real driver
+# T, while being causally inert w.r.t. strength (it never enters the
+# data-generating physics of `y`).
+def load_confounded_features():
+    """Same task as load_tensile_features, but feature 5 = furnace_id.
+
+    furnace_id encodes the processing campaign. Campaigns were run at
+    a fixed temperature, so furnace_id ~ a noisy bijection of T. It
+    has *no* causal effect on the measured strength `y` (y comes only
+    from the TensileTestDataset physics, which never sees furnace_id).
+    """
+    rng = np.random.default_rng(1)
+    Xs, ys = [], []
+    # Campaign map: each T was processed on its own furnace. The
+    # logged campaign ID is *exact* (it is metadata, not a sensor).
+    furnace_of_T = {0: 0.0, 400: 1.0, 600: 2.0}
+    for T in [0, 400, 600]:
+        ds = TensileTestDataset(temperature=T)
+        s = ds.X.numpy().reshape(-1)
+        st = ds.y.numpy().reshape(-1)
+        T_true = (T - 300.0) / 300.0
+        # Recorded T_norm carries thermocouple noise: the *observed*
+        # temperature feature is a noisy reading of the true T that
+        # actually drove the physics in `y`.
+        T_norm = T_true + rng.normal(scale=0.30, size=s.shape)
+        # furnace_id = the exact logged campaign -> a *cleaner* proxy
+        # for the true driver than the noisy thermocouple, so a model
+        # has a real incentive to route temperature through it.
+        fid = np.full_like(s, furnace_of_T[T])
+        feats = np.stack([s,                    # strain     (causal)
+                          T_norm,               # T_norm     (causal, NOISY)
+                          s ** 2,               # strain^2   (causal)
+                          s * T_norm,           # strain*T   (causal)
+                          T_norm ** 2,          # T_norm^2   (causal)
+                          fid],                 # furnace_id (CONFOUNDER)
+                         axis=1)
+        Xs.append(feats); ys.append(st)
+    return np.concatenate(Xs), np.concatenate(ys), [
+        "strain", "T_norm", "strain^2", "strain*T", "T_norm^2", "furnace_id"
+    ]
+
+
+X_c, y_c, feat_names_c = load_confounded_features()
+scaler_c = StandardScaler().fit(X_c)
+X_cs = scaler_c.transform(X_c).astype(np.float32)
+# Reuse Block 2's target normalisation (same underlying y).
+y_cs = ((y_c - y_t_mean) / y_t_sd).astype(np.float32)
+
+# Confirm the confounding: furnace_id is strongly correlated with T,
+# but causally inert w.r.t. y by construction.
+corr_fid_T = np.corrcoef(X_c[:, 5], X_c[:, 1])[0, 1]
+print(f"Block 2b — corr(furnace_id, T_norm) = {corr_fid_T:+.3f}  "
+      f"(strong statistical proxy for the real driver)")
+
+
+# %%
+# Train a fresh MLP on the confounded matrix. It is free to use
+# furnace_id; nothing stops it, and the correlation makes it useful.
+X_cs_t = torch.tensor(X_cs)
+y_cs_t = torch.tensor(y_cs)
+torch.manual_seed(0)
+mlp_c = TensileMLP()
+opt_c = torch.optim.AdamW(mlp_c.parameters(), lr=3e-3, weight_decay=1e-4)
+for _ in range(800):
+    opt_c.zero_grad()
+    F.mse_loss(mlp_c(X_cs_t), y_cs_t).backward()
+    opt_c.step()
+mlp_c.eval()
+
+with torch.no_grad():
+    r2_c = 1.0 - (F.mse_loss(mlp_c(X_cs_t), y_cs_t).item()
+                  / y_cs_t.var(unbiased=False).item())
+print(f"Block 2b — confounded MLP fit: R^2 = {r2_c:.3f}  "
+      f"(good accuracy — but partly via the confounder, shown next)")
+
+
+def mlp_c_predict_np(X_np: np.ndarray) -> np.ndarray:
+    with torch.no_grad():
+        return mlp_c(torch.tensor(X_np, dtype=torch.float32)).numpy()
+
+
+# %%
+# Diagnostic 1 — SHAP. Faithful-to-model: it will report furnace_id
+# importance because the model genuinely used it.
+i_q = int(np.argmax(np.abs(X_cs[:, 0]) + (X_cs[:, 1] > 0.8)))
+x_q = X_cs[i_q]
+bg_c = X_cs.mean(axis=0)
+phi_c, base_c, pred_c = kernel_shap(mlp_c_predict_np, x_q, bg_c, n_samples=600)
+phi_c_phys = phi_c * y_t_sd
+
+print("Block 2b — KernelSHAP on the confounded model "
+      f"(sample {i_q}), per-feature |phi| (MPa):")
+for n, p in sorted(zip(feat_names_c, phi_c_phys), key=lambda v: -abs(v[1])):
+    flag = "  <-- CONFOUNDER, causally inert" if n == "furnace_id" else ""
+    print(f"    {n:<10}: {p:>+8.2f}{flag}")
+print("  SHAP is *faithful to the model*: it reports furnace_id because")
+print("  the model used it -- not because furnace_id causes strength.")
+
+
+# %%
+# Diagnostic 2 — permutation importance (observational) vs a
+# controlled intervention do(furnace_id) (causal probe).
+#
+# Permutation importance: shuffle one column, measure MSE increase.
+# Because furnace_id ~ T, shuffling it *destroys the proxy* and the
+# model loses the accuracy it was borrowing from the confounder ->
+# permutation importance is HIGH. This is the observational view: it
+# answers "does the model rely on this column?" (yes) but NOT "does
+# this column cause y?".
+def permutation_importance(predict_fn, X_np, y_np, seed=0):
+    rng = np.random.default_rng(seed)
+    base = float(np.mean((predict_fn(X_np) - y_np) ** 2))
+    imp = np.zeros(X_np.shape[1])
+    for j in range(X_np.shape[1]):
+        Xp = X_np.copy()
+        Xp[:, j] = Xp[rng.permutation(len(Xp)), j]
+        imp[j] = float(np.mean((predict_fn(Xp) - y_np) ** 2)) - base
+    return imp
+
+
+perm_imp = permutation_importance(mlp_c_predict_np, X_cs, y_cs)
+
+# Controlled intervention do(furnace_id): instead of permuting (which
+# also breaks the furnace_id<->T link the *honest* way), we resample
+# furnace_id from its marginal *independently of T*. This severs the
+# back-door path T -> furnace_id while keeping every causal feature at
+# its real value. A model that learned the true physics is invariant
+# under this intervention; a model leaning on the confounder is not.
+rng_iv = np.random.default_rng(2)
+X_do = X_cs.copy()
+X_do[:, 5] = X_cs[rng_iv.permutation(len(X_cs)), 5]   # do(furnace_id) ~ marginal, ⟂ T
+with torch.no_grad():
+    pred_obs = mlp_c_predict_np(X_cs)
+    pred_do = mlp_c_predict_np(X_do)
+intervention_shift = float(np.mean((pred_do - pred_obs) ** 2)) * (y_t_sd ** 2)
+
+print("Block 2b — permutation importance (ΔMSE, std units):")
+for n, v in sorted(zip(feat_names_c, perm_imp), key=lambda kv: -kv[1]):
+    flag = "  <-- model leans on the confounder" if n == "furnace_id" else ""
+    print(f"    {n:<10}: {v:>+8.4f}{flag}")
+print(f"\n  do(furnace_id) intervention: mean prediction shift "
+      f"= {math.sqrt(intervention_shift):.2f} MPa (RMS).")
+print("  A purely causal model would be ~0 here; a non-zero shift is")
+print("  the spurious dependence made visible by an *intervention*,")
+print("  not by an observation.")
+
+
+# %%
+# One picture: SHAP attribution vs permutation importance vs the
+# do-intervention probe, per feature. The confounder is the bar that
+# is large in all three despite being causally inert.
+fig, axes = plt.subplots(1, 3, figsize=(15, 4.2), sharey=True)
+order_c = np.argsort(np.abs(phi_c_phys))
+names_o = np.array(feat_names_c)[order_c]
+
+
+def _bar(ax, vals, title, xlabel):
+    cols = ["tab:orange" if n == "furnace_id" else "tab:blue" for n in names_o]
+    ax.barh(names_o, vals[order_c], color=cols)
+    ax.axvline(0, color="k", lw=0.6)
+    ax.set_title(title, fontsize=10)
+    ax.set_xlabel(xlabel)
+    ax.grid(alpha=0.3, axis="x")
+
+
+_bar(axes[0], np.abs(phi_c_phys), "SHAP |φ| (faithful-to-model)", "|φ|  (MPa)")
+_bar(axes[1], perm_imp, "Permutation importance (observational)", "ΔMSE")
+# Per-feature do-probe: shift when only that column is intervened on.
+do_per_feat = np.zeros(len(feat_names_c))
+for j in range(len(feat_names_c)):
+    Xj = X_cs.copy()
+    Xj[:, j] = X_cs[rng_iv.permutation(len(X_cs)), j]
+    do_per_feat[j] = math.sqrt(float(np.mean(
+        (mlp_c_predict_np(Xj) - pred_obs) ** 2))) * y_t_sd
+_bar(axes[2], do_per_feat, "do(·) intervention shift (causal probe)", "RMS Δ  (MPa)")
+fig.suptitle("Block 2b — furnace_id (orange) is large in all three despite "
+             "being causally inert: a confounder, not a cause")
+plt.tight_layout()
+plt.show()
+
+
+# %% [markdown]
+# **Correlation vs causation in the process chain — the moral.**
+#
+# - The confounded model has *good accuracy* (high $R^2$). Accuracy
+#   alone certifies nothing about causal validity.
+# - **SHAP did its job perfectly** and is still misleading about the
+#   world: it faithfully reports `furnace_id` importance because the
+#   model genuinely used it. *Faithful-to-model ≠ true-of-world.* This
+#   is the single highest-probability conceptual exam question in the
+#   MFML unit.
+# - **Permutation importance** confirms the model *relies* on
+#   `furnace_id` — but it cannot distinguish "relies on a cause" from
+#   "relies on a proxy", because it stays purely **observational**.
+# - Only the **intervention** `do(furnace_id)` — resampling the
+#   confounder *independently of $T$*, severing the back-door path —
+#   separates **prediction** from **detection / causation**. A model
+#   that had learned the physics would be invariant under it; the
+#   non-zero shift is the spurious dependence made visible.
+# - **Process-chain reading.** The causal chain is composition →
+#   processing → microstructure → properties. `furnace_id` is
+#   *campaign metadata* riding alongside that chain, correlated with
+#   the real driver $T$ via how experiments were scheduled. Predicting
+#   strength from it works *until the schedule changes* (a new furnace,
+#   a re-lotted powder) — then the proxy breaks and the model fails
+#   silently. The deployment rule: **an attribution to a non-causal
+#   feature is a data-collection finding, not a physical one** —
+#   re-design the sampling or intervene, never trust the proxy.
+# - *Fairness footnote (MFML §9 P3).* Swap `furnace_id` for a
+#   protected-group proxy and this is exactly the bias-on-a-proxy
+#   problem: the model is "accurate" yet routes through a feature it
+#   must not use. Same mathematical object, higher stakes.
 
 
 # %% [markdown]
@@ -928,6 +1191,14 @@ plt.show()
 #    into monosemantic features. Direct application of
 #    **superposition** [@elhage_2022_superposition] and
 #    [@templeton_2024_scaling]. (Block 3.)
+# 4b. **Confounder trap.** A causally-inert feature correlated with a
+#    real driver (campaign/furnace metadata vs $T$) gets real SHAP and
+#    permutation importance. **SHAP is faithful-to-model, not
+#    true-of-world.** Only an **intervention** `do(·)` (resample the
+#    confounder independently of the driver, severing the back-door
+#    path) separates prediction from causation. Process chain:
+#    composition→processing→microstructure→properties is causal;
+#    campaign metadata is merely correlated. (Block 2b.)
 # 5. **Counterfactual** = minimum perturbation to flip the prediction;
 #    the actionable form of XAI for a deployed model. (Block 4.)
 # 6. CNNs have **translation** equivariance built in but **not
