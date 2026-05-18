@@ -1387,7 +1387,7 @@ print(f"  Tiny MAE (16x16, 2-layer transformer, CLS)     test acc = {acc_mae:.3f
 #    methods."* → which split?
 #
 # For claim 2, run `baseline_ladder` under `split_family_heldout` with a
-# *different* held-out family than Block 4's `[3, 11, 19]` (try the
+# *different* held-out family than Block 4's `[3, 4, 5]` (try the
 # alkaline-earth set `[12, 20, 38]` = Mg, Ca, Sr). Report the
 # tier-1 MAE and its gap to the random-split number — that gap is the
 # $\Delta_\text{shift}$ a discovery paper must disclose. In one
