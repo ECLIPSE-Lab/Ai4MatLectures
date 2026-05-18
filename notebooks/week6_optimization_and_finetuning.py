@@ -200,18 +200,23 @@ print(f"  fine-tuning subset: {len(ch_train)} train, {len(ch_test)} test")
 
 
 # %% [markdown]
-# # Block 2 — Catastrophic forgetting at high LR
+# # Block 2 — Catastrophic forgetting under uniform LR
 #
-# Naive transfer learning recipe: load source weights, swap the head, train
-# on the target task. We do exactly that, with a *deliberately too-high*
-# learning rate, and watch *both* test accuracies — source (Ising) and
-# target (Cahn-Hilliard) — across the fine-tune.
+# Naive transfer learning recipe: load source weights, train on the
+# target task with a *single uniform LR* for backbone and head — no
+# schedule, no discriminative-LR trick. We watch *both* test accuracies
+# — source (Ising) and target (Cahn-Hilliard) — across the fine-tune.
 #
-# What you should see: the source-task accuracy collapses within the first
-# 1-2 epochs while the target accuracy is still climbing. The model is
-# being yanked out of the basin that solves Ising and dragged into a basin
-# that solves Cahn-Hilliard. From the optimizer's point of view this is
-# **SGD on a non-stationary loss** — yesterday's loss is forgotten.
+# Two things make this block subtle. First, the collapse happens *inside
+# the first epoch* (≈24 batches) at any LR that lets the target task
+# learn at all, so we evaluate every two batches, not once per epoch —
+# a per-epoch probe just records "both at 0.5" and misses the actual
+# trajectory. Second, the LR we pick (1e-3) is *not* outrageous; it is
+# exactly the "small uniform LR" comparison Block 3 will run. The
+# punchline: even a modest uniform LR is catastrophic for the source
+# task. From the optimizer's point of view this is **SGD on a
+# non-stationary loss** — yesterday's loss is forgotten as soon as
+# today's gradient overwrites it.
 #
 # *(see ML-PC §"Catastrophic forgetting = SGD on a non-stationary loss",
 # §"Why fine-tuning needs careful optimization")*
@@ -219,8 +224,17 @@ print(f"  fine-tuning subset: {len(ch_train)} train, {len(ch_test)} test")
 # %%
 def fine_tune(state_dict, lr_backbone, lr_head, n_epochs=4,
               optimizer_cls=torch.optim.SGD, scheduler=None,
-              freeze_backbone=False, momentum=0.9):
-    """Fine-tune source weights on Cahn-Hilliard.  Track BOTH accuracies."""
+              freeze_backbone=False, momentum=0.9,
+              eval_every_batches=None):
+    """Fine-tune source weights on Cahn-Hilliard.  Track BOTH accuracies.
+
+    Index 0 of the returned arrays is always the *initial* measurement
+    (before any training step), so per-epoch arrays have length
+    ``n_epochs + 1``.  Pass ``eval_every_batches=k`` to measure every
+    ``k`` training batches instead — Block 2 uses this to resolve the
+    catastrophic-forgetting trajectory, which collapses *inside* a
+    single epoch and is invisible to a once-per-epoch probe.
+    """
     torch.manual_seed(0)
     model = CNN(n_classes=2)
     model.load_state_dict(state_dict)
@@ -241,39 +255,78 @@ def fine_tune(state_dict, lr_backbone, lr_head, n_epochs=4,
         optim_ = optimizer_cls(param_groups)
 
     sched = scheduler(optim_) if scheduler is not None else None
-    src_acc, tgt_acc = [], []
+    src_acc = [evaluate(model, ising_test_loader)]
+    tgt_acc = [evaluate(model, ch_test_loader)]
+    step = 0
     for ep in range(n_epochs):
         model.train()
         for xb, yb in ch_train_loader:
+            # Update LR for *this* step before optim_.step().  Calling
+            # sched.step() AFTER optim_.step() (the more common PyTorch
+            # idiom) would leave the very first batch at the optimizer's
+            # initial lr_max — a silent off-by-one that defeats warm-up
+            # entirely and blasts the source basin on the *first* gradient
+            # update.
+            if sched is not None:
+                sched.step()
             optim_.zero_grad()
             F.cross_entropy(model(xb), yb).backward()
             optim_.step()
-            if sched is not None:
-                sched.step()
-        src_acc.append(evaluate(model, ising_test_loader))
-        tgt_acc.append(evaluate(model, ch_test_loader))
+            step += 1
+            if eval_every_batches is not None and step % eval_every_batches == 0:
+                src_acc.append(evaluate(model, ising_test_loader))
+                tgt_acc.append(evaluate(model, ch_test_loader))
+        if eval_every_batches is None:
+            src_acc.append(evaluate(model, ising_test_loader))
+            tgt_acc.append(evaluate(model, ch_test_loader))
     return np.array(src_acc), np.array(tgt_acc)
 
 
 # %%
-# Naive too-high-LR fine-tune.  Watch source acc collapse.
-src_naive, tgt_naive = fine_tune(SOURCE_STATE, lr_backbone=0.1, lr_head=0.1)
-print(f"Naive (lr=0.1, full unfreeze):  source={src_naive[-1]:.3f}  target={tgt_naive[-1]:.3f}")
+# Naive uniform-LR fine-tune.  Sub-epoch resolution so we see the actual
+# catastrophic-forgetting trajectory inside the first epoch.
+LR_NAIVE_B2 = 1e-3
+EVAL_EVERY_B2 = 2
+src_naive, tgt_naive = fine_tune(
+    SOURCE_STATE, lr_backbone=LR_NAIVE_B2, lr_head=LR_NAIVE_B2,
+    n_epochs=4, eval_every_batches=EVAL_EVERY_B2,
+)
+print(f"Naive uniform lr={LR_NAIVE_B2}:  "
+      f"source[init]={src_naive[0]:.3f} -> source[end]={src_naive[-1]:.3f}  "
+      f"target[init]={tgt_naive[0]:.3f} -> target[end]={tgt_naive[-1]:.3f}")
+
+steps_per_epoch = len(ch_train_loader)
+ep_axis_b2 = np.arange(len(src_naive)) * EVAL_EVERY_B2 / steps_per_epoch
 
 fig, ax = plt.subplots(figsize=(6, 3.5))
-ep = np.arange(1, len(src_naive) + 1)
-ax.plot(ep, src_naive, "o-", label="source (Ising)", c="C3")
-ax.plot(ep, tgt_naive, "o-", label="target (Cahn-H)", c="C0")
-ax.set_xlabel("epoch"); ax.set_ylabel("test accuracy")
-ax.set_ylim(0.4, 1.05); ax.set_title("Block 2 — naive fine-tune at too-high LR")
+ax.plot(ep_axis_b2, src_naive, "-", label="source (Ising)", c="C3")
+ax.plot(ep_axis_b2, tgt_naive, "-", label="target (Cahn-H)", c="C0")
+ax.axvline(1.0, color="k", lw=0.6, ls="--", alpha=0.4)
+ax.text(1.02, 0.45, "end of\nepoch 1", fontsize=8, alpha=0.7)
+ax.set_xlabel("epoch (fractional, sub-epoch eval)")
+ax.set_ylabel("test accuracy")
+ax.set_ylim(0.4, 1.05)
+ax.set_title(f"Block 2 — naive uniform LR={LR_NAIVE_B2} fine-tune")
 ax.legend(); plt.tight_layout(); plt.show()
 
 
 # %% [markdown]
-# **Reading the plot.** Source accuracy starts near 1.0 (the source-task
-# checkpoint), then collapses to chance (~0.5) within 1-2 epochs as
-# backbone weights drift. Target accuracy climbs but slowly. This is the
-# textbook *catastrophic-forgetting* curve.
+# **Reading the plot.** Source accuracy starts at ~0.99 (the Ising
+# checkpoint) and decays smoothly to chance (~0.51) over the first
+# ~10 batches as the Ising-trained head and backbone are re-aligned by
+# Cahn-Hilliard gradients. Target accuracy stays near chance during
+# this re-alignment (the head is being rotated, not yet aimed at the
+# new labels), then climbs over epochs 2–4 to ≈0.95. The dashed line
+# marks the end of epoch 1 — note that the entire source collapse
+# happens *to the left of it*, which is why a per-epoch probe would
+# just read "0.5 everywhere" and miss the catastrophe.
+#
+# The key point is *not* that the LR is too high — 1e-3 is the same
+# value Block 3 uses as the "small uniform LR" comparison. The point is
+# that **uniform-LR fine-tuning has no mechanism to preserve source
+# knowledge**: the optimizer minimizes today's loss with whatever
+# weights it can move, and the head is the most movable thing in the
+# network.
 #
 # Two ways out — both standard ML-PC W6 fixes — explored next.
 
@@ -289,6 +342,8 @@ ax.legend(); plt.tight_layout(); plt.show()
 # 1. **Frozen backbone** — head only, LR 1e-2.
 # 2. **Discriminative LRs** — backbone 1e-4, head 1e-2 (factor 100).
 # 3. **Full unfreezing at uniform LR** — same LR everywhere, 1e-3.
+#    This is the Block 2 naive baseline at per-epoch resolution, kept in
+#    the comparison as a foil — we already know it forgets the source.
 #
 # *(see ML-PC §"Layer-wise / discriminative learning rates")*
 
@@ -311,12 +366,15 @@ print(f"  uniform LR (small):     source={src_uni[-1]:.3f}  target={tgt_uni[-1]:
 
 
 # %%
+# Per-epoch plots include the initial (epoch 0) state, so arrays have
+# length n_epochs + 1.  "uniform 1e-3" here is the same configuration
+# Block 2 used as the naive baseline — Block 2 just measured it at
+# sub-epoch resolution to expose the in-epoch collapse.
 fig, (a1, a2) = plt.subplots(1, 2, figsize=(11, 3.6))
-ep = np.arange(1, 5)
+ep = np.arange(len(src_frozen))
 for src, label, c in [(src_frozen, "frozen", "C0"),
                       (src_disc,   "discr.", "C1"),
-                      (src_uni,    "uniform 1e-3", "C2"),
-                      (src_naive,  "naive 1e-1 (B2)", "C3")]:
+                      (src_uni,    "uniform 1e-3 (= B2 naive)", "C2")]:
     a1.plot(ep, src, "o-", label=label, c=c)
 a1.set_title("Source (Ising) accuracy retention")
 a1.set_xlabel("epoch"); a1.set_ylabel("source-task acc")
@@ -324,8 +382,7 @@ a1.set_ylim(0.4, 1.05); a1.legend(fontsize=9)
 
 for tgt, label, c in [(tgt_frozen, "frozen", "C0"),
                       (tgt_disc,   "discr.", "C1"),
-                      (tgt_uni,    "uniform 1e-3", "C2"),
-                      (tgt_naive,  "naive 1e-1 (B2)", "C3")]:
+                      (tgt_uni,    "uniform 1e-3 (= B2 naive)", "C2")]:
     a2.plot(ep, tgt, "o-", label=label, c=c)
 a2.set_title("Target (Cahn-Hilliard) accuracy")
 a2.set_xlabel("epoch"); a2.set_ylabel("target-task acc")
@@ -334,16 +391,21 @@ plt.tight_layout(); plt.show()
 
 
 # %% [markdown]
-# **Reading the comparison.** Frozen backbone preserves source accuracy
-# perfectly (we never touched it) but caps the target accuracy where the
-# *unchanged* features happen to land. Discriminative LRs preserve most
-# of the source-task knowledge while letting the target task improve
-# beyond the frozen ceiling. Uniform-small-LR is a workable compromise
-# that needs no per-group bookkeeping.
+# **Reading the comparison.** Frozen backbone keeps the source-task
+# *features* intact (we never touched the conv weights), so source acc
+# stays well above chance even though the head was retrained on
+# Cahn-Hilliard labels. Discriminative LRs do at least as well on
+# source retention *and* let the target task improve past the frozen
+# ceiling, because the backbone can still nudge toward the new
+# distribution. The uniform-LR foil reaches a high target accuracy but
+# pays for it by collapsing the source to chance — exactly the
+# catastrophe Block 2 dissected at sub-epoch resolution.
 #
 # **Take-home.** Discriminative LRs are an *implementation* of the prior
 # we want: "the backbone is approximately right; nudge it; the head is
-# fresh; train it normally."
+# fresh; train it normally."  A uniform LR is unable to express that
+# prior at any single value — too small and nothing learns, too large
+# (which here means anything ≥ 1e-3) and the source is gone.
 
 # %% [markdown]
 # # Block 4 — Cosine schedule + warm-up rescues a high-LR fine-tune
@@ -378,7 +440,13 @@ def cosine_with_warmup(optim_, n_warmup_steps, n_total_steps, lr_max_per_group):
 
 N_EPOCHS_FT = 4
 N_STEPS_FT = N_EPOCHS_FT * len(ch_train_loader)
-LR_MAX_BB, LR_MAX_HEAD = 1e-2, 1e-2
+# lr_max=5e-2 sits comfortably *above* the catastrophic threshold for this
+# SGD+momentum=0.9 fine-tune — constant LR at this value collapses *both*
+# the source and target accuracy.  We pick it deliberately so the schedule
+# has something real to rescue; at lr_max=1e-2 the constant baseline
+# already lands in a usable region and the schedule's contribution is
+# invisible at per-epoch resolution.
+LR_MAX_BB, LR_MAX_HEAD = 5e-2, 5e-2
 
 src_warm, tgt_warm = fine_tune(
     SOURCE_STATE,
@@ -390,32 +458,43 @@ src_warm, tgt_warm = fine_tune(
         lr_max_per_group=[LR_MAX_BB, LR_MAX_HEAD],
     ),
 )
-print(f"Cosine + warm-up at lr_max=1e-2:  source={src_warm[-1]:.3f}  target={tgt_warm[-1]:.3f}")
+print(f"Cosine + warm-up at lr_max={LR_MAX_BB:.0e}: "
+      f"source={src_warm[-1]:.3f}  target={tgt_warm[-1]:.3f}")
 
 # Same model, same lr_max, *no* schedule — for the comparison.
 src_const, tgt_const = fine_tune(
     SOURCE_STATE, lr_backbone=LR_MAX_BB, lr_head=LR_MAX_HEAD,
     n_epochs=N_EPOCHS_FT,
 )
-print(f"Constant lr=1e-2 (no schedule):   source={src_const[-1]:.3f}  target={tgt_const[-1]:.3f}")
+print(f"Constant lr={LR_MAX_BB:.0e} (no schedule):  "
+      f"source={src_const[-1]:.3f}  target={tgt_const[-1]:.3f}")
 
 
 # %%
 fig, ax = plt.subplots(figsize=(6, 3.5))
-ep = np.arange(1, N_EPOCHS_FT + 1)
-ax.plot(ep, src_const, "o-", label="constant — source", c="C0", ls=":")
-ax.plot(ep, tgt_const, "o-", label="constant — target", c="C0")
-ax.plot(ep, src_warm,  "o-", label="cosine+warm-up — source", c="C2", ls=":")
-ax.plot(ep, tgt_warm,  "o-", label="cosine+warm-up — target", c="C2")
+ep = np.arange(len(src_const))
+ax.plot(ep, src_const, marker="o", label="constant — source",       c="C0", ls=":")
+ax.plot(ep, tgt_const, marker="o", label="constant — target",       c="C0", ls="-")
+ax.plot(ep, src_warm,  marker="o", label="cosine+warm-up — source", c="C2", ls=":")
+ax.plot(ep, tgt_warm,  marker="o", label="cosine+warm-up — target", c="C2", ls="-")
 ax.set_xlabel("epoch"); ax.set_ylabel("test accuracy"); ax.set_ylim(0.4, 1.05)
-ax.set_title("Block 4 — schedule rescues source-task retention at lr_max=1e-2")
+ax.set_title(f"Block 4 — schedule rescues fine-tune at lr_max={LR_MAX_BB:.0e}")
 ax.legend(fontsize=8, loc="lower right"); plt.tight_layout(); plt.show()
 
 
 # %% [markdown]
-# **Reading the rescue plot.** At the *same* lr_max, cosine + warm-up keeps
-# more source-task accuracy and reaches a similar target-task accuracy as
-# the constant-LR baseline. The schedule is doing the work of the
+# **Reading the rescue plot.** At lr_max=5e-2 — a uniform LR well above
+# the catastrophic-forgetting threshold for this SGD+momentum fine-tune —
+# the *constant* baseline collapses on *both* metrics: source accuracy
+# drops to chance and target accuracy never gets off the ground, because
+# every step takes a full-amplitude swing through the loss surface and
+# the optimizer just rattles between basins. The *cosine + warm-up*
+# schedule at the **same** lr_max keeps source accuracy noticeably above
+# chance *and* reaches near-perfect target accuracy. Two mechanisms
+# together do this: the warm-up makes the first few gradient steps small
+# enough that the source basin is left gently, and the cosine tail tapers
+# the LR to near-zero so the late epochs *settle into* the target basin
+# instead of overshooting it. The schedule is doing the work of the
 # discriminative LR from Block 3 — except it does it *over time* rather
 # than *across parameter groups*. In practice you usually combine both.
 
@@ -781,7 +860,10 @@ plt.tight_layout(); plt.show()
 # positions", §"Universal ML interatomic potentials"; ML-PC §"Pretrained
 # backbone as a frozen feature extractor"; MFML §"Linear probe vs full
 # fine-tune")*
-
+# %%
+# !pip install mace
+# !pip install ase
+# !pip install dscribe
 # %%
 # SOAP needs `dscribe`; the universal-MLIP cell additionally needs
 # `mace-torch`. We import lazily and degrade gracefully (same idiom as the

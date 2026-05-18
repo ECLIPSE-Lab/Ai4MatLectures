@@ -137,9 +137,9 @@ def rosenbrock_grad(x):
 # each optimizer competitive — Rosenbrock punishes a too-large step size.
 x0 = torch.tensor([-1.5, 2.5])
 
-traj_sgd = run_optimizer(x0, rosenbrock_grad, sgd_step, lr=0.0008, n_iter=400)
-traj_mom = run_optimizer(x0, rosenbrock_grad, momentum_step, lr=0.0008, n_iter=400)
-traj_adam = run_optimizer(x0, rosenbrock_grad, adam_step, lr=0.05, n_iter=400)
+traj_sgd = run_optimizer(x0, rosenbrock_grad, sgd_step, lr=0.0013, n_iter=400)
+traj_mom = run_optimizer(x0, rosenbrock_grad, momentum_step, lr=0.0014, n_iter=400)
+traj_adam = run_optimizer(x0, rosenbrock_grad, adam_step, lr=0.09, n_iter=400)
 
 # Plot the loss landscape with all three trajectories overlaid.
 xs = torch.linspace(-2, 2, 200)
@@ -223,11 +223,11 @@ def ill_quad_grad(x):
 # a single leaf-tensor parameter so the trajectory is honest.
 torch.manual_seed(0)
 x0 = torch.tensor([-1.0, 1.0])
-
+n_iter = 30
 p = torch.nn.Parameter(x0.clone())
 adamw = torch.optim.AdamW([p], lr=0.1, weight_decay=0.0)
 traj_adamw = [p.detach().clone()]
-for _ in range(50):
+for _ in range(n_iter):
     adamw.zero_grad()
     loss = 0.5 * (p[0] ** 2 + 100.0 * p[1] ** 2)
     loss.backward()
@@ -237,7 +237,7 @@ traj_adamw = torch.stack(traj_adamw)
 
 # Hand-rolled Lion from the same start; smaller LR because Lion's update
 # magnitude is constant (= lr) per axis.
-traj_lion = run_optimizer(x0, ill_quad_grad, lion_step, lr=0.05, n_iter=50)
+traj_lion = run_optimizer(x0, ill_quad_grad, lion_step, lr=0.05, n_iter=n_iter)
 
 
 # %%
@@ -574,13 +574,11 @@ plt.tight_layout(); plt.show()
 #
 # **What this small experiment shows.**
 #
-# - On a 4-feature problem with 27 training examples, all three optimizers
+# - On a 4-feature problem with 27 training examples, not all three optimizers
 #   converge to a comparable accuracy in the end. The descriptor ladder's
 #   bottom rung — composition-only features — is *strong* on this task.
 # - Full-batch GD is the smoothest curve (no minibatch noise).
-# - SGD with batch 8 wiggles more but reaches the same place.
-# - Adam usually overshoots early and then settles. On *this* tiny problem
-#   the overshoot is harmless; on Thursday's fine-tuning task it will not be.
+# - SGD with batch 8 wiggles more but reaches almost the same place.
 #
 # This is the "implicit prior" view: the *descriptor* (4-vector of element
 # properties) carries most of the information; the optimizer's job is to
@@ -615,3 +613,5 @@ plt.tight_layout(); plt.show()
 # 2. LR-schedule loss curves on Ising-light (Part B).
 # 3. Optimizer-preset accuracy table on ChemicalElementsDataset (Part C).
 # 4. Adam-help-or-hurt paragraph (Part D).
+
+# %%
