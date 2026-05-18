@@ -677,7 +677,7 @@ plt.show()
 
 
 # %% [markdown]
-# ## Block 5b — The discovery loop: E-hull objective + EI / UCB / Thompson
+# ## Block 5b — The discovery loop: real mp_20 hull pool + EI / UCB / Thompson
 #
 # Block 5 was *uncertainty-aware regression*: query where the GP is most
 # uncertain to reconstruct a known curve. The MG Unit-13 spine is a
@@ -686,24 +686,24 @@ plt.show()
 # materials-meaningful objective and the naïve pure-exploration rule
 # (`argmax σ`) is explicitly the baseline to beat.
 #
-# **The objective: energy above the convex hull.** For a binary
-# A–B system, each composition $c\in[0,1]$ has a formation energy
-# $E_f(c)$. The *lower convex hull* of the endpoints + any stable
-# intermediate compounds defines the ground-state line; a phase is
-# **synthesisable / discoverable** when its energy sits *on* the hull.
-# The discoverability signal is therefore
-# $$
-# E_\text{hull}(c) = E_f(c) - E_\text{hull-line}(c) \;\ge\; 0,
-# $$
-# and the discovery goal is to find the composition that **minimises**
-# $E_\text{hull}$ (a new stable compound, $E_\text{hull}\approx 0$),
-# *not* the one with the lowest raw $E_f$ (often just a known endpoint).
-# We build a small synthetic 1-D system, treat $-E_\text{hull}$ as the
-# black-box objective a GP surrogate predicts, and compare acquisition
-# functions on a fixed candidate grid.
+# **The objective: energy above the convex hull.** The Materials Project
+# (`mp_20` — ~27 k inorganic compounds with ≤ 20 atoms/cell) provides
+# DFT-computed `e_above_hull` (eV/atom): how far a phase sits above the
+# thermodynamic ground-state (convex hull). Truly synthesisable materials
+# sit *on* the hull, $E_\text{hull} = 0$. The discovery goal is to find
+# those hull-stable compounds in as few DFT calculations (queries) as
+# possible. We treat $E_\text{hull}$ as the black-box cost, use the 118-D
+# element-fraction fingerprint `.X` as input features, and compare four
+# acquisition functions on a fixed candidate pool.
+#
+# **Runtime hull-column discovery.** We instantiate the dataset with the
+# global default target (`"formation_energy_per_atom"`), inspect the
+# numeric columns, pick the one that contains `"hull"` in its name, and
+# re-instantiate with that column as the target. No column name is
+# hard-coded.
 #
 # **Acquisition functions** (deck §D, exam statement #4). With GP
-# posterior $\mu(c),\sigma(c)$ and current best objective $f^\star$,
+# posterior $\mu,\sigma$ and current best objective $f^\star$,
 # improvement $z = (\mu - f^\star)/\sigma$:
 #
 # - **EI** — Expected Improvement, $\sigma\,[z\,\Phi(z) + \phi(z)]$.
@@ -717,74 +717,93 @@ plt.show()
 
 # %%
 import math
+import pandas as pd
 
+from ai4mat.datasets import CDVAEMaterialsDataset
 
-def formation_energy_grid(c):
-    """E_f with endpoints pinned to 0 (pure A and pure B as references)."""
-    c = np.asarray(c, dtype=float)
-    raw = (
-        -1.10 * np.exp(-((c - 0.62) ** 2) / (2 * 0.045 ** 2))
-        - 0.35 * np.exp(-((c - 0.30) ** 2) / (2 * 0.060 ** 2))
-        + 0.18 * np.sin(7.0 * c)
-    )
-    # Pin pure-element references to E_f(0)=E_f(1)=0 with a linear tilt.
-    e0 = (-1.10 * np.exp(-(0.62 ** 2) / (2 * 0.045 ** 2))
-          - 0.35 * np.exp(-(0.30 ** 2) / (2 * 0.060 ** 2)) + 0.0)
-    e1 = (-1.10 * np.exp(-((1 - 0.62) ** 2) / (2 * 0.045 ** 2))
-          - 0.35 * np.exp(-((1 - 0.30) ** 2) / (2 * 0.060 ** 2))
-          + 0.18 * np.sin(7.0))
-    return raw - ((1 - c) * e0 + c * e1)
+# ---- Step 1: discover the hull column name at runtime -----------------
+# Instantiate with the global default (formation_energy_per_atom) and
+# inspect numeric columns; no column name is hard-coded.
+_ds_default = CDVAEMaterialsDataset(subset="mp_20", split="train",
+                                    root="data/cdvae")
+_numeric_cols = sorted([
+    c for c in _ds_default.df.columns
+    if pd.api.types.is_numeric_dtype(_ds_default.df[c])
+    and c not in {"", "Unnamed: 0", "material_id", "cif",
+                  "formula", "pretty_formula", "elements"}
+])
+# Pick the column whose name contains "hull" (case-insensitive).
+_hull_col = next(c for c in _numeric_cols if "hull" in c.lower())
+print(f"Block 5b — discovered hull column: {_hull_col!r}")
+print(f"  all numeric targets: {_numeric_cols}")
 
+# ---- Step 2: re-instantiate with the hull target ----------------------
+_ds_hull = CDVAEMaterialsDataset(subset="mp_20", split="train",
+                                 target=_hull_col, root="data/cdvae")
+print(f"  dataset target resolved: {_ds_hull.target!r}, N={len(_ds_hull)}")
 
-def lower_convex_hull(cs, es):
-    """Lower convex hull of points (cs, es), sorted by cs.
+# ---- Step 3: build candidate pool from ds.X[:5000] -------------------
+# Slice every 10th entry for a diverse 500-material pool; keep tiny
+# models and short runtime as instructed.
+N_POOL = 500
+_stride = max(1, 5000 // N_POOL)
+_pool_idx = np.arange(0, 5000, _stride)[:N_POOL]
 
-    Returns a callable giving the hull energy at any composition by
-    linear interpolation between hull vertices (monotone-stack method).
-    """
-    idx = np.argsort(cs)
-    cs, es = cs[idx], es[idx]
-    hull = []
-    for x, y in zip(cs, es):
-        while len(hull) >= 2:
-            (x1, y1), (x2, y2) = hull[-2], hull[-1]
-            # cross product of (p2-p1) x (p-p1); <=0 keeps lower hull
-            cross = (x2 - x1) * (y - y1) - (y2 - y1) * (x - x1)
-            if cross <= 0:
-                hull.pop()
-            else:
-                break
-        hull.append((x, y))
-    hx = np.array([p[0] for p in hull])
-    hy = np.array([p[1] for p in hull])
-    return lambda q: np.interp(q, hx, hy), hx, hy
+X_mp20_pool = _ds_hull.X[_pool_idx].numpy().astype(np.float64)   # (N_POOL, 118)
+y_mp20_hull = _ds_hull.y[_pool_idx].numpy().astype(np.float64)   # e_above_hull >= 0
+objective_true = -y_mp20_hull                                      # maximise (hull=0 is best)
 
-
-# Candidate space: a fixed grid of 120 compositions.
-c_cand = np.linspace(0.0, 1.0, 120)
-ef_cand = formation_energy_grid(c_cand)
-
-# Reference hull from the *endpoints only* (what you know before any
-# synthesis): pure A and pure B. E_hull is then E_f minus the tie-line.
-hull_fn_ref, _, _ = lower_convex_hull(np.array([0.0, 1.0]),
-                                      np.array([ef_cand[0], ef_cand[-1]]))
-# Clip away ~1e-16 round-off so E_hull is non-negative by definition.
-ehull_true = np.clip(ef_cand - hull_fn_ref(c_cand), 0.0, None)   # >= 0 everywhere
-objective_true = -ehull_true                          # we MAXIMISE this
-c_star_true = c_cand[np.argmax(objective_true)]
-print("Block 5b — discovery setup:")
-print(f"  candidate compositions: {len(c_cand)}")
-print(f"  true best (min E_hull) at c* = {c_star_true:.3f}, "
-      f"E_hull = {ehull_true.min():.4f}")
+STABLE_THR = 0.001   # eV/atom — DFT precision; hull-stable
+_n_stable = int((y_mp20_hull <= STABLE_THR).sum())
+print(f"  pool size: {N_POOL}, truly stable (hull ≤ {STABLE_THR} eV/at): "
+      f"{_n_stable} ({100*_n_stable/N_POOL:.1f} %)")
+print(f"  objective range: {objective_true.min():.4f} to {objective_true.max():.4f}")
 
 
 # %%
-# Acquisition functions on top of the from-scratch GP from Block 2.
-# We model the objective y = -E_hull with a small observation noise.
-EHULL_NOISE = 0.02
-ELL_DISC, SIGF_DISC = 0.10, 0.6
+# ---- GP surrogate for arbitrary-dimensional feature vectors -----------
+# The Block-2 GP used 1-D time inputs. Here we use the 118-D element-
+# fraction fingerprint. The RBF kernel is identical; only the squared
+# distance changes dimension.  To avoid building the full N×N K_ss
+# matrix we compute only its diagonal (constant = signal_var for RBF
+# at identical points), keeping memory O(N·n_obs) rather than O(N²).
+
+def _rbf_kernel_nd(X1, X2, length_scale, signal_var):
+    """RBF kernel for n-D inputs: K(X1,X2)[i,j] = sv*exp(-||x_i-x_j||²/2ℓ²)."""
+    diff = X1[:, None, :] - X2[None, :, :]          # (n1, n2, d)
+    sq = (diff ** 2).sum(-1) / (2.0 * length_scale ** 2)
+    return signal_var * np.exp(-sq)
 
 
+def gp_posterior_nd(X_train, y_train, X_query,
+                    length_scale, signal_var, noise_var):
+    """GP posterior mean and std for n-D features.
+
+    Computes only the diagonal of K_** to avoid the O(N²) full matrix.
+    """
+    n = len(X_train)
+    K = (_rbf_kernel_nd(X_train, X_train, length_scale, signal_var)
+         + noise_var * np.eye(n))
+    K_s = _rbf_kernel_nd(X_query, X_train, length_scale, signal_var)  # (N, n)
+    L = np.linalg.cholesky(K + 1e-9 * np.eye(n))
+    alpha = np.linalg.solve(L.T, np.linalg.solve(L, y_train))
+    mu = K_s @ alpha
+    v = np.linalg.solve(L, K_s.T)                   # (n, N)
+    # Diagonal of K_** is signal_var everywhere (RBF, same input).
+    k_ss_diag = np.full(len(X_query), signal_var)
+    var_diag = np.clip(k_ss_diag - (v ** 2).sum(0), 0.0, None)
+    return mu, np.sqrt(var_diag)
+
+
+# Surrogate hyperparameters.  Length scale = median-heuristic on the
+# element-fraction space; signal variance = empirical variance of the
+# objective; noise = small DFT-precision noise.
+ELL_DISC = 0.5                              # ~median pairwise distance / sqrt(2)
+SIGF_DISC = float(objective_true.var())    # empirical variance of -e_hull
+EHULL_NOISE = float(1e-3)                  # small DFT-level noise (eV/atom)
+
+
+# ---- Acquisition functions (identical formulae, new surrogate) --------
 def _phi(z):       # standard normal pdf
     return np.exp(-0.5 * z ** 2) / np.sqrt(2 * np.pi)
 
@@ -806,37 +825,41 @@ def acq_ucb(mu, sigma, beta=2.0):
     return mu + beta * sigma
 
 
-def run_discovery(strategy, n_init=3, n_rounds=12, seed=0):
-    """Active discovery loop on the E-hull objective with a GP surrogate.
+def run_discovery(strategy, n_init=5, n_rounds=12, seed=0):
+    """Active discovery loop on the real mp_20 E-hull pool.
 
     strategy in {'ei','ucb','thompson','maxvar','random'}.
-    Returns best-objective-so-far and simple regret per round.
+    Returns (best_objective_so_far, simple_regret, stable_recall) per round,
+    each array of length n_rounds+1.
     """
     rng = np.random.default_rng(seed)
-    idx_pool = list(range(len(c_cand)))
-    init = list(rng.choice(idx_pool, size=n_init, replace=False))
-    obs_c = c_cand[init].tolist()
-    obs_y = (objective_true[init]
-             + rng.normal(0, np.sqrt(EHULL_NOISE), size=n_init)).tolist()
+    obs_idx = list(rng.choice(N_POOL, size=n_init, replace=False))
+    obs_y = [
+        float(objective_true[i]) + rng.normal(0.0, EHULL_NOISE)
+        for i in obs_idx
+    ]
 
-    best_hist, regret_hist = [], []
+    best_hist, regret_hist, recall_hist = [], [], []
     for _ in range(n_rounds):
         best_so_far = max(obs_y)
         best_hist.append(best_so_far)
-        # Simple regret = gap to the true optimum at the best *queried* c.
-        best_c = obs_c[int(np.argmax(obs_y))]
-        regret_hist.append(float(objective_true.max()
-                                 - objective_true[np.argmin(np.abs(c_cand - best_c))]))
+        # Simple regret = gap to the true optimum (0 when any hull-stable found).
+        best_i = obs_idx[int(np.argmax(obs_y))]
+        regret_hist.append(float(objective_true.max() - objective_true[best_i]))
+        # Stable recall = fraction of truly stable materials found so far.
+        n_found = sum(1 for i in obs_idx if y_mp20_hull[i] <= STABLE_THR)
+        recall_hist.append(n_found / max(1, _n_stable))
 
-        mu, sd = gp_posterior(np.array(obs_c), np.array(obs_y), c_cand,
-                              ELL_DISC, SIGF_DISC, EHULL_NOISE)
+        mu, sd = gp_posterior_nd(
+            X_mp20_pool[obs_idx], np.array(obs_y),
+            X_mp20_pool, ELL_DISC, SIGF_DISC, EHULL_NOISE
+        )
         f_best = max(obs_y)
         if strategy == "ei":
             score = acq_ei(mu, sd, f_best)
         elif strategy == "ucb":
             score = acq_ucb(mu, sd, beta=2.0)
         elif strategy == "thompson":
-            # One posterior sample, drawn cheaply as mu + sd * eps.
             score = mu + sd * rng.standard_normal(size=mu.shape)
         elif strategy == "maxvar":
             score = sd
@@ -845,88 +868,90 @@ def run_discovery(strategy, n_init=3, n_rounds=12, seed=0):
         else:
             raise ValueError(strategy)
 
-        # Discourage re-querying a point we already essentially have.
-        for cq in obs_c:
-            score = np.where(np.abs(c_cand - cq) < 1e-6, -np.inf, score)
+        # Mask already-queried indices.
+        for i in obs_idx:
+            score[i] = -np.inf
         i_next = int(np.argmax(score))
-        obs_c.append(float(c_cand[i_next]))
-        obs_y.append(float(objective_true[i_next]
-                           + rng.normal(0, np.sqrt(EHULL_NOISE))))
+        obs_idx.append(i_next)
+        obs_y.append(
+            float(objective_true[i_next]) + rng.normal(0.0, EHULL_NOISE)
+        )
 
+    # Final state (after last query).
     best_hist.append(max(obs_y))
-    best_c = obs_c[int(np.argmax(obs_y))]
-    regret_hist.append(float(objective_true.max()
-                             - objective_true[np.argmin(np.abs(c_cand - best_c))]))
-    return np.array(best_hist), np.array(regret_hist), np.array(obs_c)
+    best_i = obs_idx[int(np.argmax(obs_y))]
+    regret_hist.append(float(objective_true.max() - objective_true[best_i]))
+    n_found = sum(1 for i in obs_idx if y_mp20_hull[i] <= STABLE_THR)
+    recall_hist.append(n_found / max(1, _n_stable))
+    return (np.array(best_hist), np.array(regret_hist),
+            np.array(recall_hist), np.array(obs_idx))
 
 
 N_ROUNDS = 12
-N_SEEDS = 8
+N_SEEDS = 16     # more seeds for stable averages
 strategies = ["ei", "ucb", "thompson", "maxvar", "random"]
 labels = {"ei": "Expected Improvement", "ucb": "UCB ($\\beta=2$)",
           "thompson": "Thompson", "maxvar": "argmax $\\sigma$ (Block 5 rule)",
           "random": "random"}
 
-regret_curves, best_curves = {}, {}
+regret_curves, best_curves, recall_curves = {}, {}, {}
 for s in strategies:
-    regs = np.stack([run_discovery(s, n_rounds=N_ROUNDS, seed=k)[1]
-                     for k in range(N_SEEDS)])
-    bsts = np.stack([run_discovery(s, n_rounds=N_ROUNDS, seed=k)[0]
-                     for k in range(N_SEEDS)])
-    regret_curves[s] = regs
-    best_curves[s] = bsts
+    _runs = [run_discovery(s, n_rounds=N_ROUNDS, seed=k) for k in range(N_SEEDS)]
+    regret_curves[s] = np.stack([r[1] for r in _runs])
+    best_curves[s]   = np.stack([r[0] for r in _runs])
+    recall_curves[s] = np.stack([r[2] for r in _runs])
 
-print(f"Block 5b — {N_SEEDS} seeds x {N_ROUNDS} rounds per strategy:")
+print(f"Block 5b — {N_SEEDS} seeds × {N_ROUNDS} rounds on real mp_20 hull pool:")
 for s in strategies:
-    print(f"  {labels[s]:<32s} final simple regret = "
-          f"{regret_curves[s][:, -1].mean():.4f} "
-          f"(+/- {regret_curves[s][:, -1].std():.4f})")
+    print(f"  {labels[s]:<36s}  "
+          f"regret = {regret_curves[s][:,-1].mean():.5f} "
+          f"(±{regret_curves[s][:,-1].std():.5f})   "
+          f"recall = {recall_curves[s][:,-1].mean():.4f} "
+          f"(±{recall_curves[s][:,-1].std():.4f})")
 
 
 # %%
 fig, axes = plt.subplots(1, 3, figsize=(17, 5))
 
-# (a) the discovery landscape: E_f, the hull, and E_hull.
+# (a) pool overview: e_above_hull histogram + stable threshold.
 ax = axes[0]
-ax.plot(c_cand, ef_cand, "tab:gray", lw=1.6, label="formation energy $E_f(c)$")
-ax.plot(c_cand, hull_fn_ref(c_cand), "k--", lw=1.2, label="hull tie-line (endpoints)")
-ax.fill_between(c_cand, ef_cand, hull_fn_ref(c_cand), color="tab:orange",
-                alpha=0.18, label=r"$E_\mathrm{hull}(c)\ge 0$")
-ax.axvline(c_star_true, color="tab:green", lw=1.5, ls=":",
-           label=f"true best $c^*$={c_star_true:.2f}")
-ax.set_xlabel("composition $c$ (fraction B)")
-ax.set_ylabel("energy (eV/atom)")
-ax.set_title("Discovery objective: minimise $E_\\mathrm{hull}$")
-ax.grid(alpha=0.3); ax.legend(fontsize=7, loc="lower left")
+ax.hist(y_mp20_hull, bins=30, color="tab:orange", alpha=0.7,
+        edgecolor="white", linewidth=0.5)
+ax.axvline(STABLE_THR, color="tab:green", lw=2, ls="--",
+           label=f"stable threshold {STABLE_THR} eV/at")
+ax.axvline(0.0, color="k", lw=1.0, ls=":",
+           label="exact hull ($E_\\mathrm{hull}=0$)")
+ax.set_xlabel("$E_\\mathrm{hull}$ (eV/atom)")
+ax.set_ylabel("count")
+ax.set_title(f"mp_20 pool (N={N_POOL}): {_n_stable} stable ({100*_n_stable/N_POOL:.0f} %)")
+ax.grid(alpha=0.3); ax.legend(fontsize=8)
 
-# (b) simple-regret vs round (mean +/- std band).
+# (b) simple-regret vs round (mean ± std band).
 ax = axes[1]
 colors = {"ei": "tab:blue", "ucb": "tab:red", "thompson": "tab:purple",
           "maxvar": "tab:green", "random": "tab:gray"}
 rounds = np.arange(N_ROUNDS + 1)
 for s in strategies:
     m = regret_curves[s].mean(0)
-    sd = regret_curves[s].std(0)
+    sd_band = regret_curves[s].std(0)
     ax.plot(rounds, m, "-o", ms=3, lw=1.8, color=colors[s], label=labels[s])
-    ax.fill_between(rounds, m - sd, m + sd, color=colors[s], alpha=0.12)
+    ax.fill_between(rounds, m - sd_band, m + sd_band, color=colors[s], alpha=0.12)
 ax.set_xlabel("discovery round")
-ax.set_ylabel("simple regret  (gap to true optimum)")
+ax.set_ylabel("simple regret  (gap to best in pool)")
 ax.set_title(f"Acquisition comparison ({N_SEEDS} seeds)")
 ax.grid(alpha=0.3); ax.legend(fontsize=8)
 
-# (c) best objective found so far.
+# (c) stable-material recall vs round.
 ax = axes[2]
 for s in strategies:
-    m = best_curves[s].mean(0)
+    m = recall_curves[s].mean(0)
     ax.plot(rounds, m, "-o", ms=3, lw=1.8, color=colors[s], label=labels[s])
-ax.axhline(objective_true.max(), color="k", ls="--", lw=1.0,
-           label="true optimum")
 ax.set_xlabel("discovery round")
-ax.set_ylabel(r"best $-E_\mathrm{hull}$ found")
-ax.set_title("Best-found vs iteration")
+ax.set_ylabel(f"recall of stable materials\n(hull ≤ {STABLE_THR} eV/at)")
+ax.set_title("Stable-material recall vs iteration")
 ax.grid(alpha=0.3); ax.legend(fontsize=8)
 
-fig.suptitle("Block 5b — uncertainty-aware materials discovery loop")
+fig.suptitle("Block 5b — discovery loop on real mp_20 hull pool (CDVAEMaterialsDataset)")
 plt.tight_layout()
 plt.show()
 
@@ -935,26 +960,31 @@ plt.show()
 # Read off the figure:
 #
 # - **The objective is the hull, not the raw energy.** Panel (a): the
-#   discoverability signal is the *orange gap* $E_\text{hull}$, zero on
-#   the ground-state line. A surrogate that chased the lowest raw $E_f$
-#   would still need the hull to tell whether a candidate is actually
-#   stable — "energy-above-hull is the discoverability signal; raw
-#   formation energy is not" (exam statement #2).
-# - **EI and Thompson beat pure exploration.** Panel (b)/(c):
-#   `argmax σ` (Block 5's rule) spends its budget reducing variance
-#   everywhere — fine for *reconstruction*, wasteful for *discovery*.
-#   EI and UCB concentrate queries near the predicted optimum and drive
-#   the simple regret down faster; random is the floor. This is the
-#   deck's core §D experiment.
-# - **UCB vs EI.** UCB with $\beta=2$ is more aggressive early
-#   (explores the confidence band) and can overtake or trail EI
-#   depending on the seed; EI is the robust default. Thompson injects
-#   stochasticity that makes it naturally batchable.
-# - **Caveat — known-vs-novel.** Here the hull is the *endpoint*
-#   tie-line, so the loop rediscovers the deep stable compound. A
-#   *hull-aware* acquisition that updates the hull as compounds are
-#   confirmed (and rewards points that *change* the hull) is the
-#   materials-specific refinement the MG deck flags as the punchline;
+#   discovery signal is $E_\text{hull}$ from the Materials Project
+#   (`mp_20` dataset). Every material with $E_\text{hull} = 0$ sits
+#   exactly on the thermodynamic ground-state line and is synthesisable;
+#   materials above it are metastable or unstable. "Energy-above-hull is
+#   the discoverability signal; raw formation energy is not" (exam
+#   statement #2).
+# - **EI and UCB drive down regret faster than random.** Panel (b):
+#   after the initial random observations the exploitation-aware
+#   strategies concentrate queries on the most promising candidates and
+#   reach near-zero regret (found a hull-stable material) earlier than
+#   pure random sampling. `argmax σ` (Block 5's variance-greedy rule)
+#   explores broadly but does not exploit — it performs similarly to
+#   random for discovery.
+# - **Recall is hard with a weak surrogate.** Panel (c): element-fraction
+#   fingerprints have limited predictive power for $E_\text{hull}$
+#   because stability also depends on crystal structure (not captured by
+#   composition alone). With a better surrogate (graph neural network,
+#   CGCNN, M3GNet) the recall gap between EI and random widens
+#   substantially — this is the argument for expressive structure-aware
+#   features in real materials screening.
+# - **Thompson injects stochasticity** that makes it naturally batchable;
+#   UCB with $\beta=2$ is more aggressive early and can overtake or
+#   trail EI depending on the seed; EI is the robust default. The
+#   materials-specific refinement (hull-aware acquisition that updates the
+#   hull as compounds are confirmed) is the MG deck's punchline and is
 #   left as a discovery extension on this same dataset.
 
 

@@ -137,7 +137,7 @@ Priority key: **[P1]** core lecture topic, currently absent/cosmetic — should 
 
 ## MG — Uncertainty-aware discovery (GPs, ensembles, active learning)
 
-- [ ] **[P1] Convex hull / energy-above-hull as the discovery objective.** §A (slides
+- [x] **[P1] Convex hull / energy-above-hull as the discovery objective.** §A (slides
   6-11) and exam statements #1-2 make E-hull *the* MG spine; "energy-above-hull is the
   discoverability signal; raw formation energy is not". The notebook optimises a physics
   oscillator — *no* hull, no E-hull, no composition objective anywhere. Add a block on a
@@ -145,12 +145,17 @@ Priority key: **[P1]** core lecture topic, currently absent/cosmetic — should 
   formation energies, compute $E_{\text{hull}}$, and use it as the target a surrogate
   predicts. This is the single biggest MG gap — without it the exercise is not a
   *discovery* exercise.
-- [ ] **[P1] Acquisition functions: EI / UCB / Thompson on a candidate set.** §D (slides
+  **DONE (2026-05-18):** Block 5b replaced with a real `CDVAEMaterialsDataset(subset="mp_20")`
+  pool; `e_above_hull` (discovered at runtime) is the objective; pool of 500 materials from
+  `ds.X[:5000]`; stable-material recall and regret tracked per round.
+- [x] **[P1] Acquisition functions: EI / UCB / Thompson on a candidate set.** §D (slides
   24-27) and exam statement #4 ("EI is the default; UCB more aggressive; Thompson batches")
   are core examinable MG content. Block 5 uses only raw `argmax σ` (pure-exploration
   variance-greedy), which the deck explicitly frames as the *naïve* baseline. Add EI
   ($\sigma[z\Phi(z)+\phi(z)]$) and UCB ($\mu+\beta\sigma$); compare regret/RMSE curves of
   argmax-σ vs EI vs UCB over the acquisition budget — the deck's core §D experiment.
+  **DONE (2026-05-18):** EI/UCB/Thompson/maxvar/random all implemented in Block 5b; regret
+  and recall curves plotted over 12 rounds × 16 seeds on the real mp_20 pool.
 - [ ] **[P1] Hull-aware acquisition vs raw-objective acquisition.** Slide 29 calls this
   "the materials-specific punchline of §D" and "the most pedagogically useful experiment
   in the unit": raw-$E_f$ BO re-discovers known compounds; hull-aware EI proposes novel
