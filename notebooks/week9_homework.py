@@ -30,9 +30,9 @@
 # > scientifically trustworthy? In materials, the answer is not a tighter
 # > loss — it is split design, residual analysis, and reporting
 # > discipline. You build the projection tools on a clean image dataset
-# > (Ising); you warm up the regression-trust toolkit on the toy
-# > `CrystalGraphsDataset`. Thursday integrates both on spectra and on
-# > crystal data.*
+# > (Ising); you warm up the regression-trust toolkit on the real
+# > `MatBenchDataset` perovskites benchmark. Thursday integrates both on
+# > spectra and on crystal data.*
 #
 # ## What this homework is
 #
@@ -56,11 +56,11 @@
 # 3. Part C: pairwise pixel-distance histograms showing your `make_positive_pair`
 #    breaks pixel similarity while preserving class.
 # 4. Part D: paragraph (~5 sentences) on PCA vs t-SNE vs contrastive.
-# 5. Part E: (i) the random-vs-grouped MAE table with the
+# 5. Part E: (i) the random / CV / family MAE table with the
 #    $\Delta_\text{shift}$ gap filled in; (ii) your one-line answer to
 #    "which split matches a *new-chemistry discovery* claim?"; (iii) the
-#    per-prototype residual table; (iv) your filled-in 7-point checklist
-#    score for the toy regressor.
+#    per-family residual table; (iv) your filled-in 7-point checklist
+#    score for the MatBench regressor.
 
 # %%
 # Standard imports for the whole homework. Same idiom as weeks 2-6.
@@ -75,7 +75,7 @@ from sklearn.linear_model import Ridge
 from sklearn.ensemble import GradientBoostingRegressor
 from sklearn.metrics import mean_absolute_error
 
-from ai4mat.datasets import IsingDataset, CrystalGraphsDataset
+from ai4mat.datasets import IsingDataset
 
 np.random.seed(0)
 torch.manual_seed(0)
@@ -497,98 +497,85 @@ ax.legend(); plt.tight_layout(); plt.show()
 # 4–5) does the heavy version. Here you build just enough machinery to
 # walk in already fluent in the four core ideas:
 #
-# 1. **leakage-safe split design** (random vs group-aware),
+# 1. **leakage-safe split design** (random vs CV-folds vs group-aware),
 # 2. the **mandatory baseline ladder** (constant → linear → GBT),
 # 3. a **per-region residual** read, and
 # 4. the **seven-point trustworthy-reporting checklist**.
 #
-# We use the toy `CrystalGraphsDataset` (the same one Thursday uses): 200
-# crystals, 5 structural **prototypes**, each crystal one cation + one
-# anion species. Its toy formation energy is a closed-form sum of a
-# prototype baseline + a cation/anion electronegativity term + a
-# radius-mismatch term + small noise — so a *composition descriptor* can
-# do real work, and the group structure gives honest leakage-safe splits.
-# No GNN training in this homework (that is Thursday); the baselines fit
-# in seconds on CPU.
+# We use the **real `MatBenchDataset` perovskites benchmark** (the same
+# one Thursday uses): ~19k DFT-relaxed perovskites, target = formation
+# energy (eV/atom), features = a 118-D element-fraction composition
+# vector (`ds.X`, `ds.y`). Because it is a real composition benchmark, a
+# composition baseline does real work and the leakage question is not
+# hypothetical. The dataset also ships 5 *reproducible surrogate* folds
+# (`ds.folds`) — official Matbench folds need the `matbench` PyPI
+# package; the surrogate folds are sufficient for split-design teaching,
+# **not** for leaderboard parity. No GNN training in this homework (that
+# is Thursday); the baselines fit in seconds on CPU on a subsample.
 #
 # *(see MG U8 §C "split design", §D29 "the mandatory baseline ladder",
 # §E "per-region residual diagnostics", §F47 "trustworthy-reporting
 # checklist")*
 
 # %%
-cg = CrystalGraphsDataset()
-proto_names = cg.prototype_names
-N_cg = len(cg)
+from ai4mat.datasets import MatBenchDataset
 
-# Per-crystal cation / anion atomic number (each toy crystal has exactly
-# one of each).  These plus the prototype are *all* the toy energy
-# depends on — so a composition descriptor is a fair, strong baseline.
-from ai4mat.datasets.crystal_graphs import (
-    _ELECTRONEGATIVITY, _RADIUS, _CATION_INDICES,
-)
+ds = MatBenchDataset(task="matbench_perovskites", download=True)
 
-cation_z = np.zeros(N_cg, dtype=np.int64)
-anion_z = np.zeros(N_cg, dtype=np.int64)
-proto_all = cg.prototype.numpy()
-y_cg = cg.y.numpy().astype(np.float64)                     # eV/atom
+# ~19k crystals make the GBT tier slow on CPU; take a seeded 4000-row
+# subsample.  All split logic operates on this subsample.
+_sub_rng = np.random.default_rng(0)
+N_MB = min(4000, len(ds.X))
+mb_sub = np.sort(_sub_rng.permutation(len(ds.X))[:N_MB])
 
-for i in range(N_cg):
-    sp = cg[i]["species"].numpy()
-    cat_pos = _CATION_INDICES[proto_names[proto_all[i]]]
-    cation_z[i] = int(sp[cat_pos[0]])
-    anion_mask = np.ones(len(sp), dtype=bool)
-    anion_mask[cat_pos] = False
-    anion_z[i] = int(sp[anion_mask][0])
+X_mb = np.asarray(ds.X)[mb_sub].astype(np.float64)         # (N_MB, 118)
+y_mb = np.asarray(ds.y)[mb_sub].astype(np.float64)         # (N_MB,) eV/atom
 
-print(f"CrystalGraphsDataset: {N_cg} crystals, "
-      f"prototypes = {proto_names}")
+# A "composition family" label derived purely from ds.X: the column of
+# the largest element fraction once oxygen (Z=8 -> column index 7) is
+# zeroed.  Most of these perovskites are oxides, so this dominant
+# non-oxygen element is a stable, purely-compositional family key — the
+# chemistry-family axis MG §B10 cares about.
+_X_no_O = X_mb.copy()
+_X_no_O[:, 7] = 0.0
+family_z = _X_no_O.argmax(axis=1) + 1                      # 1-based atomic Z
+
+# Re-index the reproducible surrogate folds onto the subsample.
+_pos = {orig: k for k, orig in enumerate(mb_sub)}
+mb_folds = []
+for tr_o, te_o in ds.folds:
+    tr = np.array([_pos[i] for i in tr_o if i in _pos], dtype=np.int64)
+    te = np.array([_pos[i] for i in te_o if i in _pos], dtype=np.int64)
+    mb_folds.append((tr, te))
+
+print(f"MatBench perovskites: using {N_MB} / {len(ds.X)} crystals; "
+      f"{len(np.unique(family_z))} composition families; "
+      f"{len(mb_folds)} reproducible surrogate folds.")
 
 
 # %%
-# A composition + structure descriptor — the Magpie-style elemental
-# statistics MG §D29 asks every baseline ladder to include.  Mean
-# cation/anion electronegativity & ionic radius, the absolute
-# electronegativity difference and the relative radius mismatch, plus a
-# one-hot prototype block (the only structural signal the baselines get).
-def descriptor():
-    """(N, d) composition+prototype descriptor for the baseline ladder."""
-    chi_c = np.array([_ELECTRONEGATIVITY[z] for z in cation_z])
-    chi_a = np.array([_ELECTRONEGATIVITY[z] for z in anion_z])
-    r_c = np.array([_RADIUS[z] for z in cation_z])
-    r_a = np.array([_RADIUS[z] for z in anion_z])
-    comp = np.stack([
-        chi_c, chi_a, np.abs(chi_c - chi_a),
-        r_c, r_a, np.abs(r_c - r_a) / ((r_c + r_a) / 2),
-    ], axis=1)
-    onehot = np.eye(len(proto_names))[proto_all]
-    return np.concatenate([comp, onehot], axis=1)
-
-
+# The composition feature is `ds.X` directly — a 118-D element-fraction
+# vector, the Magpie-spirit input MG §D29 asks every baseline ladder to
+# stand on.  No bespoke descriptor needed: real benchmark, real features.
 def split_random(seed=0, frac=0.8):
     """IID split — probes *no* generalization axis (MG slide 20)."""
     rng = np.random.default_rng(seed)
-    perm = rng.permutation(N_cg)
-    cut = int(frac * N_cg)
+    perm = rng.permutation(N_MB)
+    cut = int(frac * N_MB)
     return perm[:cut], perm[cut:]
 
 
-def split_prototype_heldout(held_proto):
-    """Structure-aware split: one whole prototype is unseen (MG §C22)."""
-    tr = np.where(proto_all != held_proto)[0]
-    te = np.where(proto_all == held_proto)[0]
-    return tr, te
-
-
-def split_cation_heldout(held_elements):
-    """Chemistry-aware split: every crystal whose cation is in
-    `held_elements` moves to test, so chemistry-family leakage is
-    impossible by construction (MG §B10 / §C21).
+def split_family_heldout(held_elements):
+    """Chemistry-aware split: every crystal whose dominant non-oxygen
+    element is in `held_elements` (1-based atomic Z) moves to test, so
+    chemistry-family leakage is impossible by construction (MG §B10 /
+    §C21).
 
     TODO (1 line): return (train_idx, test_idx).  `held` below is a
-    boolean mask that is True for crystals whose cation must be held out.
+    boolean mask that is True for crystals whose family must be held out.
     Train = crystals NOT held; test = crystals held.
     """
-    held = np.isin(cation_z, list(held_elements))
+    held = np.isin(family_z, list(held_elements))
     # TODO: replace the next line.  Hint: np.where(~held)[0], np.where(held)[0]
     train_idx, test_idx = np.where(~held)[0], np.where(held)[0]
     return train_idx, test_idx
@@ -602,10 +589,14 @@ def split_cation_heldout(held_elements):
 #
 # - **Tier 0** — constant (predict the training-set mean). "Anything
 #   that doesn't beat tier 0 is broken."
-# - **Tier 1** — composition descriptor + ridge (the Magpie+linear
-#   analogue).
-# - **Tier 2** — composition descriptor + gradient-boosted trees (the
+# - **Tier 1** — composition vector + ridge (the Magpie+linear analogue).
+# - **Tier 2** — composition vector + gradient-boosted trees (the
 #   skeptic's baseline).
+#
+# Three split designs on the real benchmark: a random 80/20, the
+# dataset's 5 *reproducible surrogate* folds (`ds.folds` — IID-but-honest
+# CV; official Matbench folds need the `matbench` pkg), and a
+# composition-family hold-out.
 #
 # A leakage rule shared by every tier: **the feature standardiser is fit
 # on train only** (MG §D32 — "any operation that touches the test data
@@ -616,9 +607,8 @@ def split_cation_heldout(held_elements):
 def baseline_ladder(tr_idx, te_idx):
     """{tier_name: test_MAE} on the given split.  Standardiser fit on
     train only — do NOT change that; it is the leakage-safe contract."""
-    X = descriptor()
-    Xtr_raw, Xte_raw = X[tr_idx], X[te_idx]
-    ytr, yte = y_cg[tr_idx], y_cg[te_idx]
+    Xtr_raw, Xte_raw = X_mb[tr_idx], X_mb[te_idx]
+    ytr, yte = y_mb[tr_idx], y_mb[te_idx]
 
     mu = Xtr_raw.mean(0, keepdims=True)                    # train-only fit
     sd = Xtr_raw.std(0, keepdims=True) + 1e-8
@@ -632,7 +622,7 @@ def baseline_ladder(tr_idx, te_idx):
     const = np.full_like(yte, ytr.mean())
     out["tier0_constant"] = mean_absolute_error(yte, const)
 
-    # Tier 1 — ridge on the composition descriptor.
+    # Tier 1 — ridge on the composition vector.
     ridge = Ridge(alpha=1.0).fit(Xtr, ytr)
     out["tier1_ridge"] = mean_absolute_error(yte, ridge.predict(Xte))
 
@@ -648,87 +638,103 @@ def baseline_ladder(tr_idx, te_idx):
 tr_r, te_r = split_random(seed=0)
 ladder_random = baseline_ladder(tr_r, te_r)
 
-# Prototype-held-out: average the 5 leave-one-prototype-out folds.
-proto_fold = {k: [] for k in ladder_random}
-for held in range(len(proto_names)):
-    tr_p, te_p = split_prototype_heldout(held)
-    for k, mae in baseline_ladder(tr_p, te_p).items():
-        proto_fold[k].append(mae)
-ladder_proto = {k: float(np.mean(v)) for k, v in proto_fold.items()}
+# ds.folds CV: average the 5 reproducible surrogate folds (the
+# random-vs-CV contrast — same IID regime, just de-noised).
+cv_fold = {k: [] for k in ladder_random}
+for tr_f, te_f in mb_folds:
+    for k, mae in baseline_ladder(tr_f, te_f).items():
+        cv_fold[k].append(mae)
+ladder_cv = {k: float(np.mean(v)) for k, v in cv_fold.items()}
 
-# Cation-element-held-out: hold out three common cations as a family.
-HELD_CATIONS = [12, 20, 26]                                # Mg, Ca, Fe
-tr_c, te_c = split_cation_heldout(HELD_CATIONS)
-ladder_cation = {k: mae for k, mae in baseline_ladder(tr_c, te_c).items()}
+# Composition-family hold-out: hold out the light-element family
+# (Z = 3 Li, 4 Be, 5 B — every crystal whose dominant non-oxygen element
+# is one of these moves entirely to test; ~330 crystals here).
+HELD_FAMILY = [3, 4, 5]
+tr_c, te_c = split_family_heldout(HELD_FAMILY)
+ladder_family = {k: mae for k, mae in baseline_ladder(tr_c, te_c).items()}
 
 print("Formation-energy MAE (eV/atom) by tier and split design")
-print(f"{'tier':<18}{'random':>10}{'proto-held':>13}{'cation-held':>13}"
-      f"{'  Δ_shift (proto)':>18}")
-print("-" * 72)
+print(f"{'tier':<18}{'random':>10}{'cv (folds)':>12}{'family-held':>13}"
+      f"{'  Δ_shift (fam)':>17}")
+print("-" * 70)
 for k in ladder_random:
-    mr, mp, mc = ladder_random[k], ladder_proto[k], ladder_cation[k]
-    print(f"{k:<18}{mr:>10.4f}{mp:>13.4f}{mc:>13.4f}{mp - mr:>18.4f}")
+    mr, mv, mc = ladder_random[k], ladder_cv[k], ladder_family[k]
+    print(f"{k:<18}{mr:>10.4f}{mv:>12.4f}{mc:>13.4f}{mc - mr:>17.4f}")
+print(f"(family hold-out: {len(te_c)} test crystals; dominant non-O "
+      f"element Z in {HELD_FAMILY})")
 
 
 # %% [markdown]
-# **What you should see (and put in your hand-in).** Every tier beats
-# tier 0 on the random split (else it would be broken). The *random*
-# number is the smallest — it probes no generalization axis. Both grouped
-# splits inflate the MAE: the gap between the grouped number and the
-# random number is the **fourth bias-variance term $\Delta_\text{shift}$**
-# (MG slide 05) — pure distribution-shift error; bias, variance, and
-# noise did not change, the *training distribution* did.
+# **What you should see (and put in your hand-in).** The learned tiers
+# (ridge, GBT) beat tier 0 on the random split (else they would be
+# broken). The *random* number is small — it probes no generalization
+# axis. The **`ds.folds` CV** column tracks the random number closely:
+# CV does not probe a *new* axis, it only de-noises the IID estimate
+# (and these are *surrogate* folds — fine for split-design teaching, not
+# leaderboard parity). The **composition-family** split inflates the
+# *learned*-tier MAE: the gap between the family number and the
+# random/CV number is the **fourth bias-variance term
+# $\Delta_\text{shift}$** (MG slide 05) — pure distribution-shift error;
+# bias, variance, and noise did not change, the *training distribution*
+# did. On a real benchmark this gap is honest and often modest (a 118-D
+# composition vector transfers reasonably across chemistries) — and
+# tier 0 can even *improve* on the held family if that family's energies
+# are low-variance, which is exactly why tier 0 is a floor, not a model.
+# Reporting the gap, modest or not, is the discipline.
 #
 # **Hand-in question (one line).** *You want to claim your model
-# discovers stable compounds in **chemistry it has never seen**. Which of
-# the three split designs gives the honest headline number for that
-# claim, and which one would be the "random-split numbers in a
-# discovery-claim paper" anti-pattern?*
+# discovers stable perovskites in **chemistry it has never seen**. Which
+# split gives the honest headline number for that claim, and which one
+# would be the "random-split numbers in a discovery-claim paper"
+# anti-pattern?*
 #
-# *(Answer for the marker: the **cation-element-held-out** split is the
-# honest headline for a new-chemistry discovery claim; reporting only the
-# **random** number for that claim is the MG slide-48 anti-pattern. The
-# prototype-held-out split answers a new-**structure** claim instead.)*
+# *(Answer for the marker: the **composition-family-held-out** split is
+# the honest headline for a new-chemistry discovery claim; reporting only
+# the **random** or surrogate-**CV** number for that claim is the MG
+# slide-48 anti-pattern. The random/CV pair answers an in-distribution
+# claim instead.)*
 
 # %% [markdown]
 # ## E.2 — A per-region residual read
 #
 # A single global MAE hides *where* a materials model fails (MG §E —
 # "global MAE hides localized failure"). The minimum honest diagnostic is
-# a per-prototype residual table: for each structural family, the test
+# a per-family residual table: for each composition family, the test
 # MAE and the **signed bias** (mean of `true − pred`; a non-zero value
 # means the model systematically over- or under-shoots that family).
 #
 # We use the tier-1 ridge on the random split as the worked regressor
-# (cheap, and it is the strongest tier on this toy target).
+# (cheap, and on this real benchmark it is competitive with the GBT
+# tier).
 
 # %%
-X = descriptor()
-mu = X[tr_r].mean(0, keepdims=True)
-sd = X[tr_r].std(0, keepdims=True) + 1e-8
-ridge_e = Ridge(alpha=1.0).fit((X[tr_r] - mu) / sd, y_cg[tr_r])
-pred_te = ridge_e.predict((X[te_r] - mu) / sd)
-true_te = y_cg[te_r]
+mu = X_mb[tr_r].mean(0, keepdims=True)
+sd = X_mb[tr_r].std(0, keepdims=True) + 1e-8
+ridge_e = Ridge(alpha=1.0).fit((X_mb[tr_r] - mu) / sd, y_mb[tr_r])
+pred_te = ridge_e.predict((X_mb[te_r] - mu) / sd)
+true_te = y_mb[te_r]
 
-print("Per-prototype residuals — tier-1 ridge, random split (MG §E38)")
-print(f"{'prototype':<13}{'N_test':>7}{'MAE':>10}{'signed bias':>14}")
-print("-" * 44)
-for p_idx, pname in enumerate(proto_names):
-    m = proto_all[te_r] == p_idx
-    if m.sum() == 0:
-        continue
+# Report the five most common composition families in the test set.
+fam_te = family_z[te_r]
+top_fam = [z for z, _ in sorted(
+    zip(*np.unique(fam_te, return_counts=True)),
+    key=lambda zc: -zc[1])][:5]
+print("Per-family residuals — tier-1 ridge, random split (MG §E38)")
+print(f"{'family Z':<10}{'N_test':>7}{'MAE':>10}{'signed bias':>14}")
+print("-" * 41)
+for z in top_fam:
+    m = fam_te == z
     mae_p = mean_absolute_error(true_te[m], pred_te[m])
-    # TODO (1 line): signed bias = mean of (true - pred) on this prototype.
+    # TODO (1 line): signed bias = mean of (true - pred) on this family.
     #   Hint: float((true_te[m] - pred_te[m]).mean())
     bias_p = float((true_te[m] - pred_te[m]).mean())
-    print(f"{pname:<13}{int(m.sum()):>7}{mae_p:>10.4f}{bias_p:>+14.4f}")
-print(f"{'GLOBAL':<13}{len(te_r):>7}"
+    print(f"Z={int(z):<8}{int(m.sum()):>7}{mae_p:>10.4f}{bias_p:>+14.4f}")
+print(f"{'GLOBAL':<10}{len(te_r):>7}"
       f"{mean_absolute_error(true_te, pred_te):>10.4f}"
       f"{float((true_te - pred_te).mean()):>+14.4f}")
 
 fig, ax = plt.subplots(figsize=(6.5, 4))
-order = np.argsort(true_te)
-ax.scatter(true_te, pred_te, s=14, alpha=0.6, edgecolor="k", lw=0.3)
+ax.scatter(true_te, pred_te, s=10, alpha=0.4, edgecolor="k", lw=0.2)
 lims = [true_te.min(), true_te.max()]
 ax.plot(lims, lims, "k--", lw=1, label="perfect")
 ax.set_xlabel("true formation energy (eV/atom)")
@@ -739,12 +745,12 @@ ax.legend(); plt.tight_layout(); plt.show()
 
 # %% [markdown]
 # **Reading the residual table.** The global MAE is one number; the
-# per-prototype rows tell you whether the model is uniformly OK or
-# whether it is carried by a few easy prototypes and quietly wrong on the
-# rest. A large per-prototype signed bias is the localized-failure
-# signature MG §E is built around — and it is invisible in the global
-# MAE. (You will extend this on Thursday with the OOD distance-to-train
-# diagnostic and a bootstrap CI.)
+# per-family rows tell you whether the model is uniformly OK or whether
+# it is carried by a few easy chemistries and quietly wrong on the rest.
+# A large per-family signed bias is the localized-failure signature MG §E
+# is built around — and it is invisible in the global MAE. (You will
+# extend this on Thursday with the OOD distance-to-train diagnostic and a
+# bootstrap CI.)
 
 # %% [markdown]
 # ## E.3 — Score this against the 7-point checklist
@@ -755,23 +761,25 @@ ax.legend(); plt.tight_layout(); plt.show()
 #
 # | # | Checklist item | Did Part E do it? |
 # |--:|:--|:--|
-# | 1 | **Split design** declared & matched to the claim | ? — we ran random *and* two grouped splits and discussed which matches a discovery claim |
-# | 2 | **Mandatory baselines** (constant, linear, GBT) | ? — tiers 0/1/2 ladder |
-# | 3 | **Per-region residuals** (per-prototype table) | ? — per-prototype MAE + signed bias |
-# | 4 | **Structure-awareness ablation** | ? — *not in this homework* (Thursday Block 5 does the edge-scramble ablation) |
-# | 5 | **Leakage paths** audited (split + train-only scaling) | ? — group-disjoint splits; standardiser fit on train only |
+# | 1 | **Split design** declared & matched to the claim | ? — we ran random, `ds.folds` CV *and* a composition-family hold-out and discussed which matches a discovery claim |
+# | 2 | **Mandatory baselines** (constant, linear, GBT) | ? — tiers 0/1/2 ladder on the real benchmark |
+# | 3 | **Per-region residuals** (per-family table) | ? — per-composition-family MAE + signed bias |
+# | 4 | **Structure-awareness ablation** | ? — *N/A on a composition-only benchmark* (Thursday Block 5b does the edge-scramble ablation on the synthetic graph) |
+# | 5 | **Leakage paths** audited (split + train-only scaling) | ? — family-disjoint splits; standardiser fit on train only |
 # | 6 | **Confidence interval** on the headline MAE | ? — *not in this homework* (Thursday Block 5 adds the bootstrap CI) |
-# | 7 | **Test-set construction** documented | ? — deterministic synthetic dataset (seed=0); real-data dedup is N/A on a toy generator |
+# | 7 | **Test-set construction** documented | ? — real Matbench `matbench_perovskites`; seeded subsample of a fixed snapshot; family-disjoint split. Official folds need the `matbench` pkg; we use the dataset's reproducible *surrogate* folds and say so |
 #
 # **Hand-in (one line).** Replace each "?" with ✅ / ◻️ and report your
-# Part E score out of 7. Then state, in one sentence, *which two missing
+# Part E score out of 7. Then state, in one sentence, *which missing
 # items Thursday's MG block must add to reach the exercise's 5/7 bar.*
 #
 # *(Answer for the marker: Part E scores **5/7** — items 1, 2, 3, 5, 7
-# are met; items 4 (structure-awareness ablation) and 6 (bootstrap CI)
-# are the two Thursday's Blocks 4–5 add. The MG sentence to leave with:
-# better features or a fancier architecture never fix bad benchmarking —
-# the split is part of the hypothesis, not the postprocessing.)*
+# are met; item 6 (bootstrap CI) is added by Thursday's Block 5 and item
+# 4 (structure-awareness ablation) by the Block-5b synthetic appendix
+# (it is N/A on a composition-only benchmark — nothing to scramble). The
+# MG sentence to leave with: better features or a fancier architecture
+# never fix bad benchmarking — the split is part of the hypothesis, not
+# the postprocessing.)*
 
 # %% [markdown]
 # ---
@@ -781,6 +789,6 @@ ax.legend(); plt.tight_layout(); plt.show()
 # 2. t-SNE 2-D plot with the distance-trap pair annotated (Part B).
 # 3. Pixel-distance histogram for positive vs negative pairs (Part C).
 # 4. Method-comparison paragraph (Part D).
-# 5. The random-vs-grouped MAE table + Δ_shift, your split-choice
-#    answer, the per-prototype residual table, and your 7-point
+# 5. The random / CV / family MAE table + Δ_shift, your split-choice
+#    answer, the per-family residual table, and your 7-point
 #    checklist score (Part E).
