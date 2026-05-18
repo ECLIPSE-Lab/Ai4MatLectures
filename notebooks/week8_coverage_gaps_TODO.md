@@ -43,7 +43,7 @@ delivered this week)** · braided exercise =
 - **MG split across two notebooks.** Homework Part F (PBC list, RBF,
   message-passing/over-smoothing, M3GNet stretch) carries most MG mechanics;
   main-notebook Block 8 is a deliberately thin SOAP+MACE bridge. The deeper
-  standalone MG walkthrough is referenced as `notebooks/MG/week08_soap_and_mace.qmd`
+  standalone MG walkthrough is referenced as `notebooks/MG/week06_soap_and_mace.qmd`
   (not audited here — out of scope, not the braided target).
 
 ## Verdict
@@ -241,7 +241,7 @@ add before the session · **[P2]** core but partially covered — extend ·
   section. This is a deck gap, not a notebook gap — but the notebook should not
   imply the lecture covered MACE/M3GNet mechanics. Add one markdown line in
   Block 8 stating the universal-MLIP material is title-only in the W8 deck and
-  the standalone walkthrough (`notebooks/MG/week08_soap_and_mace.qmd`) is the
+  the standalone walkthrough (`notebooks/MG/week06_soap_and_mace.qmd`) is the
   real treatment; optionally flag for the deck author that slides are missing.
 
 ---

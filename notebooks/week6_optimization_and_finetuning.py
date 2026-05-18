@@ -9,15 +9,16 @@
 # 2. **ML-PC Unit 6**: Transfer learning *as continued optimization* on a
 #    related loss landscape — catastrophic forgetting, discriminative LRs,
 #    cosine schedules + warm-up, why Adam often hurts during fine-tuning.
-# 3. **MG Unit 5**: Graph-based crystal representations — when the input is
-#    a *graph* of atoms instead of an image, the same optimizer choices
-#    matter, but the failure modes change.
+# 3. **MG Unit 6**: Local atomic environments — the descriptor ladder
+#    (composition → RDF → coordination → SOAP) and universal ML
+#    interatomic potentials as pretrained backbones you fine-tune.
 #
 # **Red thread:** *The optimizer is one toolbox. Today we apply it to two
 # inputs — a 64×64 phase-field image being fine-tuned across distributions
-# (Ising → Cahn–Hilliard) and a small crystal graph being trained from
-# scratch. Each block takes one MFML W6 concept and shows it materialising
-# in one of those two settings.*
+# (Ising → Cahn–Hilliard) and a frozen SOAP local-environment fingerprint
+# regressed with a small head. A fixed descriptor is a frozen backbone and
+# a universal MLIP is a pretrained one — so the MG modality is the same
+# linear-probe / fine-tune story, with atoms as the input.*
 #
 # > **Pre-flight check.** This notebook **assumes** you have run
 # > `notebooks/week6_homework.py`. Block 1 picks up directly from your Part A
@@ -32,7 +33,7 @@
 # | 3 | ~12 | Discriminative learning rates: backbone vs head |
 # | 4 | ~14 | Cosine schedule + warm-up rescues fine-tuning |
 # | 5 | ~12 | Modern optimizer bake-off — AdamW vs Adam+L2 vs Lion vs Schedule-Free AdamW |
-# | 6 | ~12 | Crystal graphs: a tiny hand-rolled message-passing GNN |
+# | 6 | ~18 | MG W6: SOAP local environments + universal MLIPs (frozen-backbone braid) |
 # | 7 | ~22 | Student exercises (3 core + 1 stretch) |
 
 # %%
@@ -48,7 +49,7 @@ from torch.utils.data import DataLoader, random_split, Subset
 import matplotlib.pyplot as plt
 
 from ai4mat.datasets import (
-    IsingDataset, CahnHilliardDataset, CrystalGraphsDataset,
+    IsingDataset, CahnHilliardDataset,
 )
 
 np.random.seed(0)
@@ -125,7 +126,8 @@ def evaluate(model, loader):
 #
 # Today the optimizer's job will not be easy. Two ways the input gets
 # harder: (a) **the loss landscape changes** when we fine-tune (Blocks 2–5);
-# (b) **the input is a graph of atoms**, not a 4-vector or an image (Block 6).
+# (b) **the input is a frozen SOAP local-environment fingerprint**, not a
+# 4-vector or an image — a fixed pretrained representation (Block 6).
 
 # %%
 # Build a *source-task* CNN: Ising-full classification, trained from scratch
@@ -751,702 +753,368 @@ plt.tight_layout(); plt.show()
 # itself is no longer a complete answer.
 
 # %% [markdown]
-# # Block 6 — Crystal graphs: a tiny hand-rolled message-passing GNN
+# # Block 6 — Local atomic environments: SOAP fingerprints and universal MLIPs
 #
-# We now switch input modality entirely. The dataset is
-# `CrystalGraphsDataset` — 200 toy crystals across 5 prototype templates
-# (rocksalt, zincblende, wurtzite, fluorite, perovskite), each populated
-# with a randomly chosen cation/anion pair. Targets are toy formation
-# energies built from electronegativity differences and radius mismatches
-# (see the dataset docstring for the exact recipe).
+# We now switch input modality entirely — and we switch it to **the MG Week 6
+# lecture** (Unit 6: *Local Atomic Environments & Universal MLIPs*). The MG
+# descriptor ladder climbs composition → RDF → coordination → **SOAP**, and
+# ends at **universal ML interatomic potentials** (MACE-MP-0, M3GNet, CHGNet).
 #
-# The point of this block is **not** to teach CGCNN. The point is to show
-# that the optimizer toolkit you used on the CNN above carries over to a
-# GNN with one twist: each crystal is a different graph, so per-step work
-# is variable and the loss landscape is rougher.
+# The braid with this week's optimizer/fine-tuning thread is exact, not
+# decorative:
 #
-# We hand-roll a 25-line message-passing GNN. No PyTorch Geometric, no
-# pymatgen, no DFT — just enough to demonstrate the optimizer choices.
+# - A **fixed descriptor** (SOAP) is the materials analogue of a **frozen
+#   pretrained backbone**. Regressing a property head on top of frozen SOAP
+#   features is precisely the *linear-probe* regime of Blocks 2–4 — the
+#   representation is given, only the head is optimized.
+# - A **universal MLIP** is a **pretrained foundation model** for atoms.
+#   Adapting it to a new system is *continued optimization on a related loss
+#   landscape* — the exact ML-PC W6 fine-tuning story, now with atoms instead
+#   of micrographs.
 #
-# *(see MG §"Crystals as periodic graphs", §"Message passing on crystal
-# graphs"; MFML §"Per-parameter LR vs uniform LR")*
+# So today's MG modality slots straight into the week's red thread: same
+# optimizer toolbox, a third input (a crystal's *local environments*), and a
+# new failure mode (the descriptor's cutoff is a model hyperparameter, not a
+# free knob).
+#
+# *(see MG §"The descriptor ladder", §"SOAP — smooth overlap of atomic
+# positions", §"Universal ML interatomic potentials"; ML-PC §"Pretrained
+# backbone as a frozen feature extractor"; MFML §"Linear probe vs full
+# fine-tune")*
 
 # %%
-class TinyCGNN(nn.Module):
-    """Atom-embedding -> n_layers of edge-conditioned message passing -> mean-pool -> MLP head.
+# SOAP needs `dscribe`; the universal-MLIP cell additionally needs
+# `mace-torch`. We import lazily and degrade gracefully (same idiom as the
+# standalone MG walkthrough notebooks/MG/week06_soap_and_mace.qmd).
+try:
+    from ase.build import bulk as ase_bulk
+    from dscribe.descriptors import SOAP
+    HAVE_SOAP = True
+except ImportError:
+    HAVE_SOAP = False
 
-    Each crystal is a single small graph (~8-12 atoms, ~12-32 edges) so
-    we run one crystal at a time inside the inner loop.  The architecture
-    is intentionally simple to fit in one screen; the point is the
-    optimization story, not the GNN sophistication.
-    """
+try:
+    from mace.calculators import mace_mp
+    HAVE_MACE = True
+except ImportError:
+    HAVE_MACE = False
 
-    def __init__(self, n_elements=120, embed_dim=16, n_layers=3):
-        super().__init__()
-        self.embed = nn.Embedding(n_elements, embed_dim)
-        self.msg_mlps = nn.ModuleList([
-            nn.Sequential(
-                nn.Linear(2 * embed_dim + 1, embed_dim), nn.ReLU(),
-                nn.Linear(embed_dim, embed_dim),
-            )
-            for _ in range(n_layers)
-        ])
-        self.head = nn.Sequential(
-            nn.Linear(embed_dim, 16), nn.ReLU(),
-            nn.Linear(16, 1),
-        )
+print(f"Block 6 — SOAP (dscribe) available: {HAVE_SOAP}   "
+      f"universal MLIP (mace-torch) available: {HAVE_MACE}")
 
-    def forward(self, species, edge_index, edge_distance):
-        h = self.embed(species)                                  # (n_nodes, d)
-        for layer in self.msg_mlps:
-            src, dst = edge_index[0], edge_index[1]
-            msg_in = torch.cat(
-                [h[src], h[dst], edge_distance.unsqueeze(-1)], dim=-1
-            )
-            msg = layer(msg_in)                                  # (n_edges, d)
-            agg = torch.zeros_like(h).index_add_(0, dst, msg)
-            h = h + agg
-        return self.head(h.mean(0)).squeeze(-1)                  # scalar y
-
+# %% [markdown]
+# ## 6.1 — A small bulk-prototype dataset
+#
+# Six prototypes spanning metallic (Cu, Fe, Al), covalent (Si) and ionic
+# (NaCl, MgO) bonding — the same dataset the MG lecture uses. We will need
+# ASE crystals both at equilibrium (for the SOAP visualisation) and over an
+# equation-of-state strain scan (for the regression braid below).
 
 # %%
-crystals = CrystalGraphsDataset()
-g = torch.Generator().manual_seed(0)
-perm = torch.randperm(len(crystals), generator=g)
-n_tr = int(0.8 * len(crystals))
-tr_idx, te_idx = perm[:n_tr].tolist(), perm[n_tr:].tolist()
+# (name, ASE prototype, equilibrium a0 [Å], reference bulk modulus [GPa]).
+# Bulk moduli are PBE/experimental values — used only to give the toy
+# regression target a *physically shaped* curvature; we are not claiming
+# DFT accuracy here.
+PROTOTYPES = [
+    ("Cu",  "fcc",      3.615, 140.0),
+    ("Fe",  "bcc",      2.866, 170.0),
+    ("Al",  "fcc",      4.046,  76.0),
+    ("Si",  "diamond",  5.431,  98.0),
+    ("NaCl", "rocksalt", 5.640,  25.0),
+    ("MgO", "rocksalt", 4.212, 165.0),
+]
 
-# Standardise targets to ~unit scale so the optimizer LRs we used on Ising
-# transfer over without retuning.
-y_all = crystals.y
-y_mean, y_std = y_all.mean().item(), y_all.std().item()
-print(f"target stats: mean={y_mean:+.3f} eV/atom  std={y_std:.3f}")
+if HAVE_SOAP:
+    eq_structures, eq_labels = [], []
+    for name, prot, a0, _B in PROTOTYPES:
+        cell = ase_bulk(name, prot, a=a0).repeat((2, 2, 2))
+        eq_structures.append(cell)
+        eq_labels.append(name)
+        print(f"{name:>4s}  {prot:>9s}  a0={a0:.3f} Å  ->  {len(cell):3d} atoms/cell")
+    SPECIES = sorted({s.symbol for atoms in eq_structures for s in atoms})
+else:
+    print("dscribe not installed — Block 6 SOAP demo will be skipped. "
+          "See notebooks/MG/week06_soap_and_mace.qmd for the standalone walkthrough.")
+
+# %% [markdown]
+# ## 6.2 — SOAP fingerprints: the descriptor sees coordination, not chemistry
+#
+# SOAP (Bartók *et al.* 2013) expands the local atomic density around each
+# atom in spherical harmonics × radial functions, then takes a
+# rotation-invariant power spectrum: a fixed-length per-atom fingerprint
+# that is invariant to rotation, translation and same-species permutation —
+# the invariance discipline the MG lecture spends §B on. A 2-D PCA of the
+# per-atom fingerprints clusters by *coordination motif* regardless of
+# element: the descriptor is geometric, not chemical.
+
+# %%
+if HAVE_SOAP:
+    soap = SOAP(species=SPECIES, periodic=True,
+                r_cut=4.5, n_max=6, l_max=4, sigma=0.4, sparse=False)
+    print(f"SOAP fingerprint length per atom: {soap.get_number_of_features()}")
+
+    per_atom, atom_struct_id = [], []
+    for i, atoms in enumerate(eq_structures):
+        d = soap.create(atoms)                       # (n_atoms, n_features)
+        per_atom.append(d)
+        atom_struct_id.append(np.full(len(atoms), i))
+    X_atom = np.concatenate(per_atom, axis=0)
+    ids_atom = np.concatenate(atom_struct_id, axis=0)
+
+    Xc = X_atom - X_atom.mean(axis=0, keepdims=True)
+    _, _, Vt = np.linalg.svd(Xc, full_matrices=False)
+    Z = Xc @ Vt[:2].T
+
+    fig, ax = plt.subplots(figsize=(6.5, 5))
+    colors = plt.cm.tab10(np.linspace(0, 1, len(eq_structures)))
+    for i, name in enumerate(eq_labels):
+        m = ids_atom == i
+        ax.scatter(Z[m, 0], Z[m, 1], s=30, alpha=0.7, color=colors[i], label=name)
+    ax.set_xlabel("PC 1"); ax.set_ylabel("PC 2")
+    ax.set_title("Block 6 — SOAP per-atom fingerprints (2-D PCA)")
+    ax.legend(loc="best")
+    plt.tight_layout(); plt.show()
+    print("Read it: FCC (12-fold) and BCC (8-fold) separate by coordination; "
+          "NaCl and MgO sit together despite different chemistry — same "
+          "rocksalt 6-fold motif. SOAP sees structure, not species.")
+
+# %% [markdown]
+# ## 6.3 — The braid: SOAP is a frozen backbone; the optimizer trains the head
+#
+# Now the optimizer thread. We build an equation-of-state regression: for
+# every prototype, strain the cell over `s ∈ [0.97, 1.03]`, compute its
+# **pooled SOAP fingerprint** (mean over atoms), and regress a smooth
+# per-atom strain-energy proxy
+#
+# $$ y(\text{proto}, s) \;=\; \tfrac12\,k_\text{proto}\,(s-1)^2 \;+\; c_\text{proto}, $$
+#
+# with $k_\text{proto}\propto B_0$ (reference bulk modulus) and a small
+# per-prototype offset $c$. The target is a *toy* but physically shaped EOS
+# well — honest about being a proxy, exactly like the toy formation energies
+# the old graph dataset used.
+#
+# The raw SOAP vector is ~5880-D for only 42 samples, so we first compress
+# it with a PCA projection (the Week-5 / MFML representation tool) to a
+# well-posed feature set — the descriptor stays *frozen*; PCA is just how we
+# read a small, conditioned summary out of it before the head.
+#
+# The pedagogical point is **not** the target. It is that SOAP is a *fixed
+# pretrained representation*: only the small head is optimized. This is the
+# linear-probe regime — so, as in Block 1's element-regressor, the optimizer's
+# job should be *easy*, and the three presets (SGD-mom / Adam / Adam+clip)
+# should land in nearly the same place. That is the materials face of the
+# Block 2–4 "freeze the backbone, train the head" story.
+
+# %%
+if HAVE_SOAP:
+    SCALES = np.linspace(0.97, 1.03, 7)
+    K_PCA = 12   # frozen SOAP is ~5880-D for 42 samples; project to a
+                 # well-posed feature set so the head is not absurdly
+                 # over-parameterised (this PCA step is itself MFML content).
+
+    def pool_eos_dataset(descriptor):
+        """Pooled SOAP fingerprint + toy EOS-well target for every
+        (prototype, strain) pair."""
+        Xr, yr = [], []
+        for pi, (name, prot, a0, B0) in enumerate(PROTOTYPES):
+            k_proto = B0 / 100.0                   # ~O(1) curvature
+            c_proto = pi * 0.05                    # per-prototype offset
+            for s in SCALES:
+                cell = ase_bulk(name, prot, a=a0 * s).repeat((2, 2, 2))
+                Xr.append(descriptor.create(cell).mean(axis=0))
+                yr.append(0.5 * k_proto * (s - 1.0) ** 2 + c_proto)
+        return np.asarray(Xr, np.float64), np.asarray(yr, np.float64)
+
+    def pca_standardize(X_raw, k):
+        """Mean-centre, project onto the top-k SVD directions, standardise."""
+        Xc = X_raw - X_raw.mean(0, keepdims=True)
+        _, _, Vt = np.linalg.svd(Xc, full_matrices=False)
+        Z = Xc @ Vt[:k].T
+        return (Z - Z.mean(0)) / (Z.std(0) + 1e-8)
+
+    X_raw, y = pool_eos_dataset(soap)
+    Xs = pca_standardize(X_raw, K_PCA)
+    ys = (y - y.mean()) / (y.std() + 1e-8)
+    print(f"EOS regression set: raw SOAP {X_raw.shape} "
+          f"-> PCA[{K_PCA}] {Xs.shape}  "
+          f"({len(PROTOTYPES)} prototypes x {len(SCALES)} strains)")
+
+    rng = np.random.default_rng(0)
+    perm = rng.permutation(len(Xs))
+    n_tr = int(0.75 * len(Xs))
+    tr, te = perm[:n_tr], perm[n_tr:]
+    Xtr = torch.tensor(Xs[tr], dtype=torch.float32)
+    ytr = torch.tensor(ys[tr], dtype=torch.float32)
+    Xte = torch.tensor(Xs[te], dtype=torch.float32)
+    yte = torch.tensor(ys[te], dtype=torch.float32)
 
 
-def gnn_train(optim_factory, label, n_epochs=8, grad_clip=None):
-    """Train a fresh TinyCGNN with the given optimizer.  One crystal per step."""
-    torch.manual_seed(0)
-    model = TinyCGNN()
-    optim_ = optim_factory(model.parameters())
-    train_mae, test_mae = [], []
-    for epoch in range(n_epochs):
-        model.train()
-        epoch_loss = 0.0
-        order = torch.randperm(len(tr_idx)).tolist()
-        for i in order:
-            sample = crystals[tr_idx[i]]
-            y_norm = (sample["y"] - y_mean) / y_std
-            optim_.zero_grad()
-            pred = model(sample["species"], sample["edge_index"],
-                         sample["edge_distance"])
-            loss = (pred - y_norm) ** 2
+    class SOAPHead(nn.Module):
+        """Tiny property head on top of frozen SOAP features."""
+
+        def __init__(self, n_in):
+            super().__init__()
+            self.net = nn.Sequential(
+                nn.Linear(n_in, 32), nn.ReLU(),
+                nn.Linear(32, 1),
+            )
+
+        def forward(self, x):
+            return self.net(x).squeeze(-1)
+
+
+    def head_train(optim_factory, label, n_epochs=200, grad_clip=None):
+        torch.manual_seed(0)
+        model = SOAPHead(Xtr.shape[1])
+        opt = optim_factory(model.parameters())
+        tr_hist, te_hist = [], []
+        for _ in range(n_epochs):
+            model.train()
+            opt.zero_grad()
+            loss = F.mse_loss(model(Xtr), ytr)
             loss.backward()
             if grad_clip is not None:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-            optim_.step()
-            epoch_loss += loss.item()
-        train_mae.append(epoch_loss / len(tr_idx))
+            opt.step()
+            tr_hist.append(loss.item())
+            model.eval()
+            with torch.no_grad():
+                te_hist.append(F.mse_loss(model(Xte), yte).item())
+        print(f"  {label:24s}  final test MSE = {te_hist[-1]:.4f}")
+        return np.array(tr_hist), np.array(te_hist)
 
-        model.eval()
+
+    print("Block 6 — three optimizer presets on the frozen-SOAP head:")
+    tr_sgd, te_sgd = head_train(
+        lambda p: torch.optim.SGD(p, lr=0.02, momentum=0.9), "SGD-mom (lr=0.02)")
+    tr_adam, te_adam = head_train(
+        lambda p: torch.optim.Adam(p, lr=0.01), "Adam (lr=0.01)")
+    tr_adam_clip, te_adam_clip = head_train(
+        lambda p: torch.optim.Adam(p, lr=0.01), "Adam+clip (lr=0.01)",
+        grad_clip=1.0)
+
+# %%
+if HAVE_SOAP:
+    fig, (a1, a2) = plt.subplots(1, 2, figsize=(11, 3.8))
+    for tr_h, lab in [(tr_sgd, "SGD-mom"), (tr_adam, "Adam"),
+                      (tr_adam_clip, "Adam+clip")]:
+        a1.plot(tr_h, label=lab)
+    a1.set_yscale("log"); a1.set_xlabel("epoch"); a1.set_ylabel("train MSE")
+    a1.set_title("Frozen-SOAP head — train loss"); a1.legend()
+    for te_h, lab in [(te_sgd, "SGD-mom"), (te_adam, "Adam"),
+                      (te_adam_clip, "Adam+clip")]:
+        a2.plot(te_h, label=lab)
+    a2.set_yscale("log"); a2.set_xlabel("epoch"); a2.set_ylabel("test MSE")
+    a2.set_title("Frozen-SOAP head — test loss"); a2.legend()
+    plt.tight_layout(); plt.show()
+
+# %% [markdown]
+# **Take-home from 6.3.** On a *frozen* SOAP representation the optimizer
+# choice barely matters — all three presets reach a comparable test MSE,
+# exactly as in Block 1's element regressor. That is the signature of the
+# linear-probe regime: when the representation is already good, the head is
+# a near-convex problem and the optimizer's job is easy. The optimizer only
+# becomes the bottleneck when you *unfreeze* and start fine-tuning the
+# representation itself — which, for atoms, means fine-tuning a universal
+# MLIP (6.5).
+
+# %% [markdown]
+# ## 6.4 — The cutoff radius is a *model hyperparameter*, not a free knob
+#
+# MG §"Cutoff radius as a scientific hyperparameter" and the failure-mode
+# section both make this point: the local-environment radius `r_cut`
+# changes *which atoms are neighbours*, so it changes the descriptor — and
+# therefore the model. We refit the frozen-SOAP head at three cutoffs and
+# watch the test error move. The cutoff is part of the hypothesis, and it
+# must be chosen on held-out data, never tuned on the test set.
+
+# %%
+if HAVE_SOAP:
+    print("Block 6 — cutoff sensitivity (Adam, identical everything else):")
+    for r_cut in (3.0, 4.5, 6.0):
+        sp = SOAP(species=SPECIES, periodic=True, r_cut=r_cut,
+                  n_max=6, l_max=4, sigma=0.4, sparse=False)
+        Xr_raw, _ = pool_eos_dataset(sp)
+        Xrs = pca_standardize(Xr_raw, K_PCA)
+        Xtr_r = torch.tensor(Xrs[tr], dtype=torch.float32)
+        Xte_r = torch.tensor(Xrs[te], dtype=torch.float32)
+        torch.manual_seed(0)
+        m = SOAPHead(Xtr_r.shape[1])
+        op = torch.optim.Adam(m.parameters(), lr=0.01)
+        for _ in range(200):
+            op.zero_grad()
+            Floss = F.mse_loss(m(Xtr_r), ytr)
+            Floss.backward(); op.step()
         with torch.no_grad():
-            errs = []
-            for j in te_idx:
-                s = crystals[j]
-                y_norm = (s["y"] - y_mean) / y_std
-                p = model(s["species"], s["edge_index"], s["edge_distance"])
-                errs.append((p - y_norm).abs().item())
-            test_mae.append(float(np.mean(errs)) * y_std)         # de-normalise
-    print(f"  {label:25s}  final test MAE = {test_mae[-1]:.3f} eV/atom")
-    return np.array(train_mae), np.array(test_mae)
-
-
-# %%
-print("Block 6 — three optimizer presets on CrystalGraphsDataset:")
-tr_sgd_g, te_sgd_g = gnn_train(
-    lambda p: torch.optim.SGD(p, lr=0.05, momentum=0.9),
-    "SGD-mom (lr=0.05)",
-)
-tr_adam_g, te_adam_g = gnn_train(
-    lambda p: torch.optim.Adam(p, lr=0.005),
-    "Adam (lr=0.005)",
-)
-tr_adam_clip_g, te_adam_clip_g = gnn_train(
-    lambda p: torch.optim.Adam(p, lr=0.005),
-    "Adam + clip(1.0)",
-    grad_clip=1.0,
-)
-
-
-# %%
-fig, (a1, a2) = plt.subplots(1, 2, figsize=(11, 3.6))
-for tr, label, c in [(tr_sgd_g, "SGD-mom", "C0"),
-                     (tr_adam_g, "Adam", "C3"),
-                     (tr_adam_clip_g, "Adam + clip(1)", "C2")]:
-    a1.plot(tr, "o-", label=label, c=c, lw=1.4)
-a1.set_xlabel("epoch"); a1.set_ylabel("train MSE (normalised)")
-a1.set_yscale("log"); a1.set_title("Crystal GNN — train MSE"); a1.legend()
-
-for te, label, c in [(te_sgd_g, "SGD-mom", "C0"),
-                     (te_adam_g, "Adam", "C3"),
-                     (te_adam_clip_g, "Adam + clip(1)", "C2")]:
-    a2.plot(te, "o-", label=label, c=c, lw=1.4)
-a2.set_xlabel("epoch"); a2.set_ylabel("test MAE (eV/atom)")
-a2.set_title("Crystal GNN — test MAE"); a2.legend()
-plt.tight_layout(); plt.show()
-
+            te_mse = F.mse_loss(m(Xte_r), yte).item()
+        print(f"  r_cut = {r_cut:>3.1f} Å   raw_dim = "
+              f"{sp.get_number_of_features():4d}  PCA={K_PCA}  "
+              f"test MSE = {te_mse:.4f}")
+    print("Different cutoffs => different descriptors => different test "
+          "error. r_cut belongs in your model-selection loop, not the "
+          "test set.")
 
 # %% [markdown]
-# **Three things are happening on this plot.**
+# ## 6.5 — Universal MLIP = a pretrained foundation model you fine-tune
 #
-# 1. **SGD with momentum is a perfectly reasonable choice** — the GNN is
-#    small, the loss is well-conditioned once we standardise targets, and
-#    the per-step noise (one crystal at a time) acts as light regularisation.
-# 2. **Adam without gradient clipping can spike** — message passing on a
-#    fresh embedding occasionally produces large gradients that Adam's
-#    running variance cannot dampen quickly. You may see one or two epochs
-#    where the loss jumps before settling.
-# 3. **Gradient clipping fixes (2) cheaply.** A single line of code
-#    (`torch.nn.utils.clip_grad_norm_`) bounds the worst case and makes Adam
-#    train as smoothly as SGD on this problem.
+# A universal MLIP (MACE-MP-0, Batatia *et al.* 2023) is one set of weights
+# trained on the Materials Project / Alexandria dataset that covers most of
+# the periodic table at near-DFT accuracy. Conceptually it is the atoms
+# analogue of a pretrained vision/language backbone:
 #
-# **Forward link to MG U7 / U8.** Real CGCNN / MEGNet / M3GNet training
-# uses *exactly* this template — Adam + cosine schedule + gradient
-# clipping. Knowing why each ingredient is there is the point of Week 6.
+# - **Zero-shot** = use it as-is for single-point energies/forces.
+# - **Fine-tune** = continue optimization on your system's data — the *exact*
+#   ML-PC W6 transfer-learning loop, with the same hazards (catastrophic
+#   forgetting, discriminative LRs, warm-up) you exercised in Blocks 2–4.
+#
+# The single-point cell below runs only if `mace-torch` is installed; it is
+# optional, like the standalone MG walkthrough. The braid point stands
+# without it: *the MLIP is the backbone; fine-tuning it is this week's
+# optimizer story applied to atoms.*
+
+# %%
+if HAVE_MACE and HAVE_SOAP:
+    import time as _t
+    mace_calc = mace_mp(model="small", default_dtype="float32", device="cpu")
+    print("Block 6 — MACE-MP-0 zero-shot single-points (small model):")
+    for atoms, name in zip(eq_structures, eq_labels):
+        c = atoms.copy(); c.calc = mace_calc
+        t0 = _t.perf_counter()
+        e = c.get_potential_energy()
+        f = c.get_forces()
+        dt = _t.perf_counter() - t0
+        print(f"  {name:>4s}  N={len(c):3d}  E={e:+9.3f} eV  "
+              f"|F|_max={np.linalg.norm(f, axis=1).max():.2e} eV/Å  "
+              f"t={dt*1e3:6.1f} ms")
+    print("Fine-tuning these weights on a target system = Blocks 2-4 "
+          "(discriminative LRs / warm-up) with atoms as the input.")
+else:
+    print("mace-torch not installed — skipping the zero-shot MLIP demo. "
+          "The full universal-MLIP walkthrough (EOS benchmark + MLIP-MD + "
+          "energy-conservation check) is in "
+          "notebooks/MG/week06_soap_and_mace.qmd.")
 
 # %% [markdown]
-# # Block 6b — From toy graphs to *real* crystal graphs (MG Unit 5 core)
+# **Block 6 take-home.**
 #
-# Block 6 trained on the dataset's **pre-baked** fixed graphs and fed the
-# message MLP a raw scalar distance with an implicit hard cutoff. That was
-# fine for the *optimizer* story but it skips the three pieces of machinery
-# MG Unit 5 spends its whole lecture on:
+# 1. **The descriptor ladder ends at SOAP for hand-built features.** SOAP is
+#    a rotation/translation/permutation-invariant local-environment
+#    fingerprint — it encodes geometry, not chemistry (6.2).
+# 2. **A fixed descriptor is a frozen backbone.** Regressing on frozen SOAP
+#    is the linear-probe regime: the optimizer choice barely matters (6.3),
+#    mirroring Block 1. Optimizer pain returns only when you *unfreeze*.
+# 3. **The cutoff is a hyperparameter of the model** and moves the test
+#    error (6.4) — choose it on held-out data, with the leakage discipline
+#    from ML-PC.
+# 4. **A universal MLIP is a pretrained foundation model for atoms** (6.5);
+#    adapting it is literally this week's fine-tuning story.
 #
-# 1. **Periodic boundary conditions.** A crystal is infinite. The "graph"
-#    is whatever you get by searching for neighbours within a cutoff
-#    radius *across periodic images* of the unit cell — not a fixed
-#    template. Change the cutoff and you change the graph.
-# 2. **Distance featurization.** Real crystal GNNs (CGCNN, SchNet, MEGNet)
-#    never feed the raw scalar bond length. They expand it in a basis of
-#    **Gaussian radial basis functions (RBF)** and multiply by a **smooth
-#    cutoff envelope** so the edge feature → 0 *continuously* as an atom
-#    leaves the cutoff sphere.
-# 3. **Why the envelope matters.** A hard cutoff makes the predicted
-#    energy *discontinuous* in atomic position — fatal for forces and a
-#    reproducibility landmine. We show that artifact directly.
-#
-# Frame the Block-6 `TinyCGNN` honestly: it is **CGCNN/SchNet minus
-# RBF + PBC**. This block adds the two missing pieces on small toy
-# lattices and re-runs the same optimizer presets so the comparison is
-# apples-to-apples.
-#
-# *(see MG §"Crystals as periodic graphs", §"Minimum-image convention",
-# §"RBF edge features + smooth cutoff", §"Ranking metrics for screening";
-# MFML §"What did the optimizer actually fit?")*
-
-# %% [markdown]
-# ## 6b.1 — Toy periodic lattices
-#
-# We do not have `pymatgen` or `ase` as exercise dependencies, so we
-# hand-roll the minimal thing: each crystal becomes a small cubic lattice
-# (a `(N, 3)` array of fractional coordinates in `[0, 1)` plus a cubic
-# box length `L` in Å). We reuse the dataset's species and toy formation
-# energies unchanged — only the **graph construction** becomes physical.
-#
-# The atom count per prototype is kept identical to the dataset templates
-# so the targets `crystals.y` stay meaningful; we just place those atoms
-# on a real periodic lattice instead of using the abstract template edges.
-
-# %%
-# A deterministic toy lattice per prototype: a simple cubic arrangement of
-# the prototype's atoms inside a cubic box. The box length is chosen so the
-# nearest-neighbour spacing is ~ the sum of covalent radii, i.e. the same
-# physical scale the dataset used for its toy bond lengths.
-_PROTO_GRID = {
-    # prototype_index : (n_atoms, grid_shape)  with n_atoms == prod(grid)
-    0: (8, (2, 2, 2)),    # rocksalt   — 8-atom cube
-    1: (8, (2, 2, 2)),    # zincblende
-    2: (8, (2, 2, 2)),    # wurtzite
-    3: (12, (3, 2, 2)),   # fluorite   — 12 atoms
-    4: (10, (5, 2, 1)),   # perovskite — 10 atoms
-}
-
-
-def build_periodic_lattice(species, prototype, rng):
-    """Place `species` on a small cubic lattice; return (frac, L).
-
-    frac : (N, 3) float64 fractional coordinates in [0, 1)
-    L    : float, cubic box edge length in Angstrom
-
-    The lattice is the integer grid for the prototype, rescaled into the
-    unit cube, plus a small random displacement so different crystals see
-    different geometry (mirrors the dataset's distance distortion).
-    """
-    n = len(species)
-    _, grid = _PROTO_GRID[prototype]
-    gx, gy, gz = grid
-    coords = np.array(
-        [(i, j, k) for i in range(gx) for j in range(gy) for k in range(gz)],
-        dtype=np.float64,
-    )[:n]
-    # Nearest-neighbour spacing target ~ mean covalent-radius sum of the cell.
-    from ai4mat.datasets.crystal_graphs import _RADIUS
-    r_mean = float(np.mean([_RADIUS[int(z)] for z in species]))
-    spacing = 1.8 * r_mean                       # Å between adjacent sites
-    L = spacing * max(gx, gy, gz)
-    frac = coords / np.array([gx, gy, gz], dtype=np.float64)
-    # Small random rattle (±3% of the box) so geometry varies per crystal.
-    frac = frac + rng.uniform(-0.03, 0.03, size=frac.shape)
-    frac = np.mod(frac, 1.0)                      # wrap back into the cell
-    return frac, float(L)
-
-
-# %% [markdown]
-# ## 6b.2 — Minimum-image neighbour search
-#
-# The core PBC primitive. For a cubic box of edge `L`, the **minimum-image
-# convention** says: the distance between atoms `i` and `j` is the
-# distance to the *closest periodic image* of `j`. For a cubic cell that
-# is one line of code on the fractional displacement:
-#
-# $$\Delta f \;\leftarrow\; \Delta f - \operatorname{round}(\Delta f),
-#   \qquad d \;=\; L\,\lVert \Delta f \rVert .$$
-#
-# We build a directed edge `i → j` (both directions) for every pair within
-# `r_cut`. This is the `O(N^2)` brute-force version — correct and fine for
-# our ≤12-atom toy cells; real codes use a cell list for `O(N · k̄)`.
-
-# %%
-def pbc_neighbor_graph(frac, L, r_cut):
-    """Minimum-image neighbour search inside a cubic box.
-
-    Parameters
-    ----------
-    frac : (N, 3) fractional coordinates in [0, 1)
-    L    : cubic box edge length (Å)
-    r_cut: cutoff radius (Å)
-
-    Returns
-    -------
-    edge_index : int64 tensor (2, M)  directed edges (i->j and j->i)
-    edge_dist  : float32 tensor (M,)  minimum-image distances (Å)
-    """
-    frac = np.asarray(frac)
-    n = len(frac)
-    src, dst, dists = [], [], []
-    for i in range(n):
-        for j in range(n):
-            if i == j:
-                continue
-            df = frac[j] - frac[i]
-            df = df - np.round(df)               # minimum-image convention
-            d = L * float(np.linalg.norm(df))
-            if d <= r_cut:
-                src.append(i)
-                dst.append(j)
-                dists.append(d)
-    if not src:                                  # degenerate: r_cut too small
-        return (torch.zeros((2, 0), dtype=torch.int64),
-                torch.zeros((0,), dtype=torch.float32))
-    edge_index = torch.tensor([src, dst], dtype=torch.int64)
-    edge_dist = torch.tensor(dists, dtype=torch.float32)
-    return edge_index, edge_dist
-
-
-# %%
-# Build a PBC graph view of the whole dataset once, at a fixed cutoff.
-# We keep the dataset's species/y; only edges + distances are recomputed.
-R_CUT = 3.2                                      # Å — captures 1st (and some 2nd) shell
-
-_lat_rng = np.random.default_rng(0)
-pbc_graphs = []
-for idx in range(len(crystals)):
-    s = crystals[idx]
-    sp = s["species"]
-    proto = s["prototype"]
-    frac, L = build_periodic_lattice(sp.numpy(), proto, _lat_rng)
-    ei, ed = pbc_neighbor_graph(frac, L, R_CUT)
-    pbc_graphs.append({"species": sp, "edge_index": ei,
-                       "edge_distance": ed, "y": s["y"],
-                       "frac": frac, "L": L})
-
-_deg = np.array([g["edge_index"].shape[1] / len(g["species"])
-                 for g in pbc_graphs])
-print(f"PBC graphs built: r_cut={R_CUT} Å  "
-      f"mean degree = {_deg.mean():.2f}  "
-      f"(min {_deg.min():.1f}, max {_deg.max():.1f})")
-print("Note: degree now DEPENDS on the cutoff — it is no longer a fixed "
-      "template.")
-
-
-# %% [markdown]
-# ## 6b.3 — Gaussian RBF expansion + smooth cutoff envelope
-#
-# Instead of feeding the scalar distance `d`, we expand it on a grid of
-# Gaussians centred at `mu_k` and multiply by a **cosine cutoff envelope**
-# `0.5 (1 + cos(pi d / r_cut))` that decays smoothly to exactly 0 at
-# `r_cut` (Behler 2011 / SchNet). The hard-cutoff baseline instead uses a
-# step indicator `1[d <= r_cut]` — and *that* step is the artifact.
-
-# %%
-class RBFExpansion(nn.Module):
-    """Gaussian RBF edge featurizer with a switchable cutoff envelope.
-
-    edge_feat_k = exp(-gamma (d - mu_k)^2) * envelope(d)
-
-    envelope = smooth cosine  (default, physical)
-             | hard step      (pedagogical 'wrong' baseline)
-    """
-
-    def __init__(self, r_cut, n_rbf=16, smooth=True):
-        super().__init__()
-        centers = torch.linspace(0.0, r_cut, n_rbf)
-        self.register_buffer("centers", centers)
-        # Width = one grid spacing (standard SchNet-style choice).
-        spacing = float(centers[1] - centers[0])
-        self.gamma = 1.0 / (spacing ** 2)
-        self.r_cut = float(r_cut)
-        self.smooth = smooth
-
-    def envelope(self, d):
-        if self.smooth:
-            env = 0.5 * (1.0 + torch.cos(math.pi * d / self.r_cut))
-        else:
-            env = torch.ones_like(d)             # hard cutoff = no taper
-        return env * (d <= self.r_cut).float()   # zero strictly outside
-
-    def forward(self, d):
-        rbf = torch.exp(-self.gamma * (d.unsqueeze(-1) - self.centers) ** 2)
-        return rbf * self.envelope(d).unsqueeze(-1)            # (M, n_rbf)
-
-
-# %% [markdown]
-# ### The hard-cutoff discontinuity artifact
-#
-# Take one atom and slide a neighbour radially outward through `r_cut`.
-# With the **hard** cutoff the summed edge feature (a proxy for the
-# energy contribution of that bond) jumps to zero discontinuously the
-# instant the neighbour crosses `r_cut`. With the **smooth** envelope it
-# decays to zero continuously. The discontinuity is what breaks forces
-# (= −∂E/∂x) and makes a hard-cutoff model irreproducible near the shell.
-
-# %%
-d_scan = torch.linspace(2.0, 4.0, 400)           # sweep a bond length through r_cut
-rbf_hard = RBFExpansion(R_CUT, n_rbf=16, smooth=False)
-rbf_soft = RBFExpansion(R_CUT, n_rbf=16, smooth=True)
-
-# "Bond energy proxy" = total RBF activation on that single edge.
-e_hard = rbf_hard(d_scan).sum(-1)
-e_soft = rbf_soft(d_scan).sum(-1)
-
-fig, ax = plt.subplots(figsize=(6.2, 3.6))
-ax.plot(d_scan, e_hard, c="C3", lw=1.8, label="hard cutoff (step)")
-ax.plot(d_scan, e_soft, c="C2", lw=1.8, label="smooth cosine envelope")
-ax.axvline(R_CUT, ls=":", c="0.4", label=f"r_cut = {R_CUT} Å")
-ax.set_xlabel("bond length d (Å)")
-ax.set_ylabel("Σ RBF activation  (bond-energy proxy)")
-ax.set_title("Block 6b — hard cutoff is discontinuous at r_cut")
-ax.legend(fontsize=9)
-plt.tight_layout()
-plt.show()
-
-print(f"jump at r_cut (hard)  = {abs(e_hard[d_scan <= R_CUT][-1]):.3f}  "
-      f"-> 0 across one step  (discontinuous)")
-print(f"value at r_cut (soft) = {e_soft[d_scan <= R_CUT][-1]:.3e}  "
-      f"(continuous, ->0)")
-
-
-# %% [markdown]
-# ## 6b.4 — `TinyCGNN_RBF`: the Block-6 GNN with RBF edge features
-#
-# Same message-passing skeleton as `TinyCGNN`; the *only* change is the
-# edge channel. Where `TinyCGNN` concatenated a single raw distance,
-# `TinyCGNN_RBF` concatenates the `n_rbf`-dim smooth RBF vector. We also
-# expose the **readout** (mean vs sum) because it is a one-line change
-# with a real physical meaning (intensive vs extensive energy).
-
-# %%
-class TinyCGNN_RBF(nn.Module):
-    """CGCNN/SchNet-flavoured: atom embedding -> RBF-conditioned message
-    passing -> pooled readout -> MLP head.
-
-    readout = "mean"  -> intensive target (energy per atom)
-            = "sum"   -> extensive target (total energy)
-    """
-
-    def __init__(self, rbf, n_elements=120, embed_dim=16, n_layers=3,
-                 readout="mean"):
-        super().__init__()
-        self.rbf = rbf
-        n_rbf = len(rbf.centers)
-        self.embed = nn.Embedding(n_elements, embed_dim)
-        self.msg_mlps = nn.ModuleList([
-            nn.Sequential(
-                nn.Linear(2 * embed_dim + n_rbf, embed_dim), nn.ReLU(),
-                nn.Linear(embed_dim, embed_dim),
-            )
-            for _ in range(n_layers)
-        ])
-        self.head = nn.Sequential(
-            nn.Linear(embed_dim, 16), nn.ReLU(),
-            nn.Linear(16, 1),
-        )
-        self.readout = readout
-
-    def forward(self, species, edge_index, edge_distance):
-        h = self.embed(species)
-        if edge_index.shape[1] > 0:
-            edge_feat = self.rbf(edge_distance)               # (M, n_rbf)
-            for layer in self.msg_mlps:
-                src, dst = edge_index[0], edge_index[1]
-                msg_in = torch.cat([h[src], h[dst], edge_feat], dim=-1)
-                msg = layer(msg_in)
-                agg = torch.zeros_like(h).index_add_(0, dst, msg)
-                h = h + agg
-        pooled = h.sum(0) if self.readout == "sum" else h.mean(0)
-        return self.head(pooled).squeeze(-1)
-
-
-# %% [markdown]
-# ## 6b.5 — Ranking / discovery metrics
-#
-# For screening you do not care about absolute MAE; you care whether the
-# model **ranks** candidates correctly and whether the true best few are
-# in the model's top-k shortlist. We add three rank-aware metrics
-# alongside MSE/MAE. We hand-roll the rank correlations (no scipy import
-# in this notebook) so the definitions are visible:
-#
-# - **Spearman ρ** — Pearson correlation of the *ranks*.
-# - **Kendall τ** — fraction of concordant minus discordant pairs.
-# - **Top-k recall** — of the `k` truly lowest-energy crystals, how many
-#   appear in the model's predicted lowest-`k`.
-
-# %%
-def _ranks(x):
-    """Average ranks (ties shared) of a 1-D numpy array."""
-    order = np.argsort(x, kind="mergesort")
-    ranks = np.empty(len(x), dtype=np.float64)
-    ranks[order] = np.arange(len(x), dtype=np.float64)
-    # average tied ranks
-    _, inv, counts = np.unique(x, return_inverse=True, return_counts=True)
-    sums = np.zeros(len(counts))
-    np.add.at(sums, inv, ranks)
-    return (sums / counts)[inv]
-
-
-def spearman_rho(y_true, y_pred):
-    rt, rp = _ranks(np.asarray(y_true)), _ranks(np.asarray(y_pred))
-    rt = rt - rt.mean()
-    rp = rp - rp.mean()
-    denom = np.sqrt((rt ** 2).sum() * (rp ** 2).sum())
-    return float((rt * rp).sum() / denom) if denom > 0 else 0.0
-
-
-def kendall_tau(y_true, y_pred):
-    yt, yp = np.asarray(y_true), np.asarray(y_pred)
-    n = len(yt)
-    c = d = 0
-    for i in range(n):
-        for j in range(i + 1, n):
-            s = np.sign(yt[i] - yt[j]) * np.sign(yp[i] - yp[j])
-            if s > 0:
-                c += 1
-            elif s < 0:
-                d += 1
-    tot = c + d
-    return float((c - d) / tot) if tot > 0 else 0.0
-
-
-def topk_recall(y_true, y_pred, k):
-    """Fraction of the true lowest-k that land in the predicted lowest-k.
-
-    Lower energy = better candidate, so we take the *smallest* values.
-    """
-    yt, yp = np.asarray(y_true), np.asarray(y_pred)
-    true_best = set(np.argsort(yt, kind="mergesort")[:k])
-    pred_best = set(np.argsort(yp, kind="mergesort")[:k])
-    return len(true_best & pred_best) / k
-
-
-# %% [markdown]
-# ## 6b.6 — Re-run the optimizer presets on the *physical* graphs
-#
-# Same training loop shape as Block 6, but now (a) the graphs come from
-# the PBC neighbour search, (b) edges carry smooth RBF features, and
-# (c) we report the ranking metrics next to MSE/MAE. Same three optimizer
-# presets so the optimizer story still lines up with Block 6.
-
-# %%
-def gnn_train_rbf(optim_factory, label, n_epochs=8, grad_clip=None,
-                  readout="mean", graphs=None, smooth=True):
-    """Train a fresh TinyCGNN_RBF on the PBC graphs. One crystal per step.
-
-    Returns (train_mse_curve, test_mae_curve, metrics_dict) where metrics
-    are computed on the held-out split at the final epoch.
-    """
-    graphs = pbc_graphs if graphs is None else graphs
-    torch.manual_seed(0)
-    rbf = RBFExpansion(R_CUT, n_rbf=16, smooth=smooth)
-    model = TinyCGNN_RBF(rbf, readout=readout)
-    optim_ = optim_factory(model.parameters())
-    train_mse, test_mae = [], []
-    for epoch in range(n_epochs):
-        model.train()
-        epoch_loss = 0.0
-        order = torch.randperm(len(tr_idx)).tolist()
-        for i in order:
-            g_ = graphs[tr_idx[i]]
-            y_norm = (g_["y"] - y_mean) / y_std
-            optim_.zero_grad()
-            pred = model(g_["species"], g_["edge_index"],
-                         g_["edge_distance"])
-            loss = (pred - y_norm) ** 2
-            loss.backward()
-            if grad_clip is not None:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-            optim_.step()
-            epoch_loss += loss.item()
-        train_mse.append(epoch_loss / len(tr_idx))
-
-        model.eval()
-        with torch.no_grad():
-            errs = []
-            for j in te_idx:
-                g_ = graphs[j]
-                y_norm = (g_["y"] - y_mean) / y_std
-                p = model(g_["species"], g_["edge_index"],
-                          g_["edge_distance"])
-                errs.append((p - y_norm).abs().item())
-            test_mae.append(float(np.mean(errs)) * y_std)
-
-    # Final-epoch predictions on the held-out split, de-normalised.
-    model.eval()
-    with torch.no_grad():
-        y_true, y_hat = [], []
-        for j in te_idx:
-            g_ = graphs[j]
-            p = model(g_["species"], g_["edge_index"], g_["edge_distance"])
-            y_hat.append(p.item() * y_std + y_mean)
-            y_true.append(g_["y"].item())
-    y_true, y_hat = np.array(y_true), np.array(y_hat)
-    k = max(1, len(te_idx) // 5)                 # top-20% shortlist
-    metrics = {
-        "MSE": float(np.mean((y_true - y_hat) ** 2)),
-        "MAE": float(np.mean(np.abs(y_true - y_hat))),
-        "Spearman": spearman_rho(y_true, y_hat),
-        "Kendall": kendall_tau(y_true, y_hat),
-        f"top{k}_recall": topk_recall(y_true, y_hat, k),
-    }
-    print(f"  {label:24s}  MAE={metrics['MAE']:.3f} eV/atom  "
-          f"rho={metrics['Spearman']:.3f}  tau={metrics['Kendall']:.3f}  "
-          f"top{k}-recall={metrics[f'top{k}_recall']:.2f}")
-    return np.array(train_mse), np.array(test_mae), metrics
-
-
-# %%
-print("Block 6b — same optimizer presets, now on PBC + RBF graphs:")
-tr_sgd_r, te_sgd_r, m_sgd_r = gnn_train_rbf(
-    lambda p: torch.optim.SGD(p, lr=0.05, momentum=0.9),
-    "SGD-mom (lr=0.05)",
-)
-tr_adam_r, te_adam_r, m_adam_r = gnn_train_rbf(
-    lambda p: torch.optim.Adam(p, lr=0.005),
-    "Adam (lr=0.005)",
-)
-tr_adam_clip_r, te_adam_clip_r, m_adam_clip_r = gnn_train_rbf(
-    lambda p: torch.optim.Adam(p, lr=0.005),
-    "Adam + clip(1.0)",
-    grad_clip=1.0,
-)
-
-
-# %%
-fig, (a1, a2) = plt.subplots(1, 2, figsize=(11, 3.6))
-for tr, label, c in [(tr_sgd_r, "SGD-mom", "C0"),
-                     (tr_adam_r, "Adam", "C3"),
-                     (tr_adam_clip_r, "Adam + clip(1)", "C2")]:
-    a1.plot(tr, "o-", label=label, c=c, lw=1.4)
-a1.set_xlabel("epoch"); a1.set_ylabel("train MSE (normalised)")
-a1.set_yscale("log"); a1.set_title("PBC+RBF crystal GNN — train MSE")
-a1.legend()
-
-for te, label, c in [(te_sgd_r, "SGD-mom", "C0"),
-                     (te_adam_r, "Adam", "C3"),
-                     (te_adam_clip_r, "Adam + clip(1)", "C2")]:
-    a2.plot(te, "o-", label=label, c=c, lw=1.4)
-a2.set_xlabel("epoch"); a2.set_ylabel("test MAE (eV/atom)")
-a2.set_title("PBC+RBF crystal GNN — test MAE"); a2.legend()
-plt.tight_layout(); plt.show()
-
-
-# %%
-# Side-by-side metric table: ranking metrics are what screening cares about.
-print(f"\n{'optimizer':<18}{'MSE':>8}{'MAE':>8}"
-      f"{'Spearman':>10}{'Kendall':>9}{'topk-rec':>10}")
-print("-" * 63)
-for name, m in [("SGD-mom", m_sgd_r),
-                ("Adam", m_adam_r),
-                ("Adam+clip", m_adam_clip_r)]:
-    kkey = [x for x in m if x.startswith("top")][0]
-    print(f"{name:<18}{m['MSE']:>8.3f}{m['MAE']:>8.3f}"
-          f"{m['Spearman']:>10.3f}{m['Kendall']:>9.3f}{m[kkey]:>10.2f}")
-
-
-# %% [markdown]
-# **Reading the metric table.** MAE alone hides what matters for
-# *discovery*: two models with similar MAE can rank candidates very
-# differently. Spearman ρ / Kendall τ measure whether the model orders
-# crystals by stability correctly; top-k recall measures whether the
-# truly most-stable crystals make the shortlist you would actually send
-# to DFT. A screening model with mediocre MAE but high ρ is often more
-# useful than the reverse — this is the MG "metrics for screening" point.
-
-# %% [markdown]
-# ## 6b.7 — Readout: sum (extensive) vs mean (intensive)
-#
-# One-line change, real physics. The dataset target is energy **per atom**
-# (intensive) → `mean` pooling is the physically-consistent readout.
-# `sum` pooling predicts an *extensive* quantity and must learn to undo
-# the variable atom count itself, which on a fixed per-atom target just
-# injects an N-dependent nuisance. We show the gap with everything else
-# held fixed.
-
-# %%
-print("Block 6b — readout contrast (Adam, identical everything else):")
-_, te_mean, m_mean = gnn_train_rbf(
-    lambda p: torch.optim.Adam(p, lr=0.005), "mean-pool (intensive)",
-    readout="mean",
-)
-_, te_sum, m_sum = gnn_train_rbf(
-    lambda p: torch.optim.Adam(p, lr=0.005), "sum-pool  (extensive)",
-    readout="sum",
-)
-print(f"  mean-pool final test MAE = {te_mean[-1]:.3f} eV/atom  "
-      f"(rho={m_mean['Spearman']:.3f})")
-print(f"  sum-pool  final test MAE = {te_sum[-1]:.3f} eV/atom  "
-      f"(rho={m_sum['Spearman']:.3f})")
-print("Take-home: match the readout to the target's extensivity. Per-atom "
-      "target -> mean; total-energy target -> sum.")
-
-
-# %% [markdown]
-# **Block 6b take-home.**
-#
-# 1. **The graph is a modelling choice, not a given.** PBC + a cutoff
-#    *define* the neighbour list; change `R_CUT` and you change the model
-#    input. (Try `R_CUT = 2.6` vs `4.0` and re-run — mean degree and
-#    accuracy both move.)
-# 2. **Smooth cutoff is not optional.** The hard-cutoff discontinuity
-#    plot in 6b.3 is exactly why production crystal GNNs use an envelope:
-#    discontinuous energy ⇒ undefined/garbage forces ⇒ irreproducible MD.
-# 3. **Report ranking metrics for screening.** MSE/MAE answer "how close",
-#    Spearman/Kendall/top-k answer "did we find the good ones" — the
-#    question discovery actually asks.
-# 4. **Readout encodes a physical assumption** (intensive vs extensive);
-#    it is one line and it matters.
-#
-# `TinyCGNN_RBF` is still "CGCNN/SchNet minus the learned filter-generating
-# network and equivariance". Closing *that* gap (and the rotation-
-# invariance check) is the MG Unit 5 / Unit 7 reading task.
+# **Forward pointer to MG Week 8.** The next MG lecture replaces SOAP's
+# *fixed, hand-designed* aggregation with a *learned* one: a graph neural
+# network that messages over the same neighbour lists. The Week 8 braided
+# exercise (`week8_uncertainty_and_robustness.py`) carries that hand-rolled
+# crystal-graph machinery — PBC neighbour construction, RBF edge features,
+# the hard-cutoff artifact, ranking metrics — as its MG anchor.
 
 # %% [markdown]
 # # Block 7 — Student exercises (~22 min)
@@ -1480,7 +1148,7 @@ print("Take-home: match the readout to the target's extensivity. Per-atom "
 #
 # **Setup.** Block 2's naive lr=0.1 fine-tune collapsed source accuracy
 # inside one epoch. You verified in Block 6 that gradient clipping tames
-# Adam on the GNN.
+# Adam on the frozen-SOAP regression head.
 #
 # **Task.** Add `torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)`
 # to the fine-tune loop and rerun Block 2 at lr=0.1. Two questions:
@@ -1500,8 +1168,8 @@ print("Take-home: match the readout to the target's extensivity. Per-atom "
 # top-eigenvalue λ_max, vanilla GD is stable iff `lr < 2 / λ_max`. Above
 # that threshold the loss diverges.
 #
-# **Task.** Take the Block 6 TinyCGNN and find the *empirical* edge of
-# stability for SGD without momentum:
+# **Task.** Take the Block 6 frozen-SOAP head and find the *empirical*
+# edge of stability for SGD without momentum:
 #
 # 1. Train at lr ∈ {0.01, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0} for 3 epochs each;
 #    record final train loss.
@@ -1520,7 +1188,7 @@ print("Take-home: match the readout to the target's extensivity. Per-atom "
 #
 # - Homework Part A: 2-D analytic landscapes
 # - Homework Part C: 4-feature element vectors
-# - Block 6: variable-size atom graphs
+# - Block 6: frozen SOAP local-environment fingerprints
 #
 # **Task.** Pick one optimizer (Adam) and one diagnostic (e.g., gradient
 # norm distribution per epoch). Plot it for *all three* settings on the

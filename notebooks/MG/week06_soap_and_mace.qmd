@@ -1,10 +1,10 @@
 ---
-title: "MG Week 8: Local Environments and Universal MLIPs"
+title: "MG Week 6: Local Environments and Universal MLIPs"
 subtitle: "SOAP fingerprints and MACE-MP-0 single-point + MD on a small bulk-prototype dataset"
 jupyter: python3
 ---
 
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/ECLIPSE-Lab/Ai4MatLectures/blob/main/notebooks/MG/week08_soap_and_mace.ipynb)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/ECLIPSE-Lab/Ai4MatLectures/blob/main/notebooks/MG/week06_soap_and_mace.ipynb)
 
 ## Learning Objectives
 
