@@ -11,3 +11,7 @@ _site/
 /.quarto/
 data/NEU-DET/
 data/estm/
+data/matbench/
+data/rmd17/
+data/cdvae/
+data/qm9/

@@ -119,7 +119,30 @@ Real-download verified for rMD17/CDVAE/QM9; MatBench parse-path verified against
 real cached file (its figshare mirror 403'd inside the sandbox only). Core paths need
 no heavy deps (pymatgen/ase/rdkit optional); raw CIF/SMILES kept accessible per item.
 
+## Exercise integration status (2026-05-18, plan executed)
+
+Per `docs/superpowers/plans/2026-05-18-mg-dataset-exercise-integration.md`
+(subagent-driven, two-stage reviewed, committed on `main`):
+
+| Wk | Change | Dataset | Commit |
+|----|--------|---------|--------|
+| W9 | MG-U8 ladder+splits → real data; GNN tier kept as labelled synthetic appendix | `MatBenchDataset` | `2e0d619`,`5018e76` |
+| W12 | added real-crystal discovery-funnel stage; 2-D CVAE toy core preserved | `CDVAEMaterialsDataset` | `c0fe1d3` |
+| W8 | added rMD17 MLIP energy+force self-study block (correlated-sample lesson) | `RMD17Dataset` | `4429563` |
+| W10 | added real composition-ceiling block + QM9 contrast; GNN lesson preserved | `MatBenchDataset`,`QM9Dataset` | `11dfa46` |
+| W13 | discovery loop on real mp_20 hull pool | `CDVAEMaterialsDataset` | `2829945` (done by P. Pelz directly, not this loop) |
+
+Cross-cutting: `d7e882a` fixed the MatBench downloader (browser User-Agent —
+materialsproject.org 403s the default urllib UA, would have broken it for
+students). `.gitignore` extended so the new dataset caches
+(`data/{matbench,rmd17,cdvae,qm9}/`) are not committed (mirrors the existing
+`data/NEU-DET/`,`data/estm/` convention). Fast test suite: 67 passed, 9
+slow-download tests deselected. Strategy: swap data only in data-agnostic
+blocks; ADD real-data blocks where a rewrite would break the graph/CVAE lesson.
+
 ---
-*Audit changes: only the `weekN_coverage_gaps_TODO.md` files and this index were
+*Audit changes: the `weekN_coverage_gaps_TODO.md` files and this index were
 created/edited. Dataset work added `ai4mat/datasets/{matbench,rmd17,cdvae_materials,qm9}.py`
-+ tests + the `__init__.py` exports. Nothing committed.*
++ tests + the `__init__.py` exports (committed `ac306f3`). Exercise-integration
+commits are listed above. Unrelated in-progress working changes (week6 files,
+data/week3_mystery.npz) were left untouched.*
