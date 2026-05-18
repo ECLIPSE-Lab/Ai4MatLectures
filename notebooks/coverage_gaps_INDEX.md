@@ -101,5 +101,25 @@ Priority key: **[P1]** core lecture topic absent/cosmetic · **[P2]** core but p
 - [ ] MFML: down-weighted — only W11 diffusion-loop and W13 Lagaris are [P1].
 
 ---
-*No lecture decks or notebooks were modified by this audit; only the
-`weekN_coverage_gaps_TODO.md` files and this index were created.*
+
+## New MG datasets added to `ai4mat` (2026-05-18)
+
+Four static-download (no API key) `torch` datasets added under `ai4mat/datasets/`,
+exported from `ai4mat.datasets`, each with a contract test. They unlock MG-side
+content for the exercises (notebook integration is a follow-up, not yet done):
+
+| Class | `ai4mat.datasets` | Unlocks (MG units / weeks) | Notes |
+|---|---|---|---|
+| `MatBenchDataset` | `task=` selector (jdft2d…mp_gap) | U7–U9 property prediction; U8 generalization/splits | composition/structure → property; surrogate 5-fold CV (official folds need the `matbench` pkg) |
+| `RMD17Dataset` | `molecule=` (10), `n_samples≤1000` | U4–U6 MLIP/dynamics (was dataset-less) | energy+forces; 67–175 MB/molecule one-time cache; >1000-sample warning |
+| `CDVAEMaterialsDataset` | `subset=perov_5\|carbon_24\|mp_20` | U12 generative + U13 discovery | CIF + formation energy/e_above_hull; official splits |
+| `QM9Dataset` | `target=` (19 props) | U9 molecular property prediction | 134k molecules, CC0; crude SMILES feature baseline |
+
+Real-download verified for rMD17/CDVAE/QM9; MatBench parse-path verified against a
+real cached file (its figshare mirror 403'd inside the sandbox only). Core paths need
+no heavy deps (pymatgen/ase/rdkit optional); raw CIF/SMILES kept accessible per item.
+
+---
+*Audit changes: only the `weekN_coverage_gaps_TODO.md` files and this index were
+created/edited. Dataset work added `ai4mat/datasets/{matbench,rmd17,cdvae_materials,qm9}.py`
++ tests + the `__init__.py` exports. Nothing committed.*

@@ -8,6 +8,10 @@ from .nanoindentation import NanoindentationDataset
 from .neu_det import NEUDETDataset
 from .crystal_graphs import CrystalGraphsDataset
 from .estm import ESTMDataset
+from .matbench import MatBenchDataset
+from .rmd17 import RMD17Dataset
+from .cdvae_materials import CDVAEMaterialsDataset
+from .qm9 import QM9Dataset
 
 __all__ = [
     "IrisDataset",
@@ -20,4 +24,8 @@ __all__ = [
     "NEUDETDataset",
     "CrystalGraphsDataset",
     "ESTMDataset",
+    "MatBenchDataset",
+    "RMD17Dataset",
+    "CDVAEMaterialsDataset",
+    "QM9Dataset",
 ]
