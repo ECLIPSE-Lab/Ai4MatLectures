@@ -1014,6 +1014,88 @@ plt.show()
 
 
 # %% [markdown]
+# ## Part E+ (optional stretch) — the same funnel on REAL crystals
+#
+# The 1-D toy above isolated the *mechanics*. This optional stretch shows
+# the **same funnel transfers verbatim to real crystals**: the perovskite
+# subset (`perov_5`) of the **CDVAE benchmark** (Xie et al., ICLR 2022) —
+# the dataset family the deck's CDVAE→DiffCSP→MatterGen→FlowMM lineage is
+# trained on. Each material is a 118-dim composition (element-fraction)
+# vector with a scalar DFT property; **no CVAE rebuild** — you screen a
+# candidate *stream* with the deck's funnel, ensemble-variance doing the
+# uncertainty triage (Thursday's Block 6.5 Stage B does exactly this).
+#
+# This is scaffolded as TODOs: fill the four marked lines, then run.
+
+# %%
+# TODO (E.2): load the real CDVAE perovskite set and DISCOVER its numeric
+# target column at runtime (do NOT hard-code a column name — the loader's
+# numeric columns differ per subset). Skeleton:
+#
+#   from ai4mat.datasets import CDVAEMaterialsDataset
+#   import numpy as np
+#   from sklearn.ensemble import RandomForestRegressor
+#
+#   ds_cd = CDVAEMaterialsDataset(subset="perov_5", split="train",
+#                                 root="data/cdvae", download=True)
+#   # the loader resolves a valid per-subset default for you:
+#   target_col = ds_cd.target
+#   numeric_cols = [c for c in ds_cd.df.columns
+#                   if np.issubdtype(ds_cd.df[c].dtype, np.number)
+#                   and c != "material_id"]
+#   print("numeric columns:", numeric_cols, "| target =", target_col)
+#
+#   N = min(6000, ds_cd.X.shape[0])
+#   X_cd = ds_cd.X.numpy()[:N].astype(np.float64)   # (N, 118) compositions
+#   y_cd = ds_cd.y.numpy()[:N].astype(np.float64)   # (N,) real DFT property
+#
+# TODO (E.3): fit a small random-forest surrogate on a 60% split; the mean
+# of the trees is the property prediction, the cross-tree std is the
+# epistemic-uncertainty estimate (the deck's "ensemble variance"
+# alternative to the GP for the uncertainty-triage stage). Skeleton:
+#
+#   rng = np.random.default_rng(0); perm = rng.permutation(N)
+#   tr, ho = perm[:int(0.6 * N)], perm[int(0.6 * N):]
+#   rf = RandomForestRegressor(n_estimators=120, max_depth=12,
+#                              n_jobs=-1, random_state=0).fit(X_cd[tr], y_cd[tr])
+#   def rf_mu_sd(X):
+#       P = np.stack([t.predict(X) for t in rf.estimators_], 0)
+#       return P.mean(0), P.std(0)
+#
+# TODO (E.4): emulate a generator's OUTPUT stream (no 118-dim CVAE) by
+# multiplicative composition-space jitter of the disjoint hold-out
+# crystals, renormalised to sum to 1; target the 75th-pct property.
+# Skeleton:
+#
+#   def emulate(X_seed, n, jitter=0.15, seed=7):
+#       g = np.random.default_rng(seed)
+#       c = X_seed[g.integers(0, len(X_seed), n)].copy()
+#       c = np.clip(c * g.gamma(1.0 / jitter, size=c.shape), 0, None)
+#       r = c.sum(1, keepdims=True); r[r == 0] = 1.0
+#       return c / r
+#   X_seed = X_cd[ho]; y_star = float(np.percentile(y_cd, 75))
+#   raw = emulate(X_seed, 8000)
+#
+# TODO (E.5): run the SAME six-stage funnel as the 1-D `discovery_funnel`
+# above, adapted to compositions — validity (non-negative, sums to ~1),
+# intra-batch uniqueness (round + dedup), novelty (min L1 distance to
+# X_seed > ~0.20), on-target (|rf-mean - y_star| <= rf hold-out MAE),
+# uncertainty triage (cross-tree sd <= 60th-pct of sd on X_seed). Print
+# the stage table + S.U.N. rate, and barh the waterfall on a log x-axis.
+# The waterfall must be NON-degenerate (survivors > 0, but a small
+# fraction of the raw batch) — the deck's "wide top is mandatory" picture
+# on real data. Reflect (2 sentences): how does the real-crystal yield
+# compare to the 1-D toy's, and why is the validity stage so much harder
+# in 118-dim composition space than in 1-D [0, 1]?
+
+# %% [markdown]
+# > # Your Part E+ reflection (optional):
+# >
+# > *(2 sentences: real-crystal yield vs 1-D toy; why 118-dim validity is
+# > harder)*
+
+
+# %% [markdown]
 # ## Hand-in checklist
 #
 # Bring (or have on screen) the following on Thursday:

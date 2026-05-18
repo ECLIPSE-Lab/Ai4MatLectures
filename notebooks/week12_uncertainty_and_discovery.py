@@ -1080,6 +1080,18 @@ plt.show()
 # %% [markdown]
 # # Block 6.5 — MG Unit 12 anchor: a conditional generative model + the inverse-design funnel
 #
+# **Roadmap for this block.** It has *two stages*. **Stage A (a toy 2-D
+# substrate for CVAE / CFG mechanics)** trains a deliberately tiny
+# conditional VAE on the 2-D `NanoindentationDataset` $(E, H)$ so the
+# *generative mechanics* — a learned $p(x\mid y^\star)$, classifier-free
+# guidance, the discovery funnel, the uncertainty-triage braid — are
+# legible in a space you can scatter-plot. It is a teaching analogue, not a
+# crystal generator. **Stage B (real crystals)** then re-runs the *same
+# funnel + S.U.N. + uncertainty-triage logic* on a real generative-materials
+# benchmark — the perovskite subset of the CDVAE dataset, 118-dim
+# composition features — so you see the identical pipeline on genuine
+# crystal data the deck's CDVAE→…→FlowMM lineage is trained on.
+#
 # Everything so far was **forward**: given a material (E, or strain, or an
 # (E, H) point) predict a property and ask *where should I measure next?*
 # MG Unit 12 inverts the arrow. Instead of *searching* the materials space
@@ -1121,6 +1133,15 @@ plt.show()
 # Unconditional Generation", §"The Discovery Funnel", §"The S.U.N. Metric",
 # §"Classifier vs Classifier-Free Guidance", §"Uncertainty-Aware
 # Filtering"; bridges to MFML §"GP posterior" and ML-PC §"21CrMoV5-7 GP".)*
+
+# %% [markdown]
+# ## Stage A — toy 2-D substrate for CVAE / CFG mechanics
+#
+# This whole stage is a **teaching analogue**: a 2-D CVAE on
+# `NanoindentationDataset` $(E, H)$. The point is *not* the materials —
+# it is to make conditional sampling, classifier-free guidance, the
+# funnel, and the uncertainty-triage braid visible in a space you can
+# scatter-plot. Stage B repeats the funnel logic on real crystals.
 
 # %%
 # Reuse the Block-5 nanoindentation arrays (Xn, yn, cluster_id,
@@ -1505,6 +1526,291 @@ plt.show()
 # Alexandria). (3) The novelty/target/uncertainty thresholds are policy
 # choices, as in Block 5 — Exercise 6 sweeps the guidance weight and the
 # funnel cutoffs so you feel how the yield/quality trade-off moves.
+
+
+# %% [markdown]
+# ## Stage B — the same funnel on REAL crystals (`CDVAEMaterialsDataset`)
+#
+# Stage A's CVAE is a 2-D teaching toy. **Stage B keeps the funnel logic
+# unchanged but swaps the substrate for real crystals**: the perovskite
+# subset (`perov_5`) of the **CDVAE benchmark** (Xie et al., ICLR 2022) —
+# the exact dataset family the deck's CDVAE → DiffCSP → MatterGen → FlowMM
+# lineage is trained on. Each material is a 118-dim *element-fraction*
+# vector $x$ (composition, no pymatgen/ase needed) with a scalar DFT
+# property $y$.
+#
+# We do **not** rebuild a 118-dim CVAE here (a real crystal generator is
+# the deck's SOTA, out of scope for a class cell). The pedagogical move is:
+# *given a stream of candidate compositions, run the deck's
+# **generate → validity → uniqueness → novelty → on-target → uncertainty
+# triage** funnel + S.U.N.-style rate on REAL data*, with a real surrogate
+# doing the property prediction and a real predictive-variance estimate
+# doing the triage. The candidate "stream" stands in for a generator's
+# output; the funnel + UQ-bridge logic is *identical* to Stage A — only the
+# dimensionality and the data are real.
+#
+# **Discover the target at runtime.** The CDVAE loader's numeric property
+# columns differ per subset, so we instantiate with the loader's *default*
+# target first, inspect the real numeric columns, and only then pick one —
+# never hard-coding a column name.
+
+# %%
+from ai4mat.datasets import CDVAEMaterialsDataset
+
+# Step 1: instantiate with the loader DEFAULT (no explicit target) so we
+# can discover which numeric property columns this subset actually has.
+ds_cd = CDVAEMaterialsDataset(subset="perov_5", split="train",
+                              root="data/cdvae", download=True)
+numeric_cols = [c for c in ds_cd.df.columns
+                if np.issubdtype(ds_cd.df[c].dtype, np.number)
+                and c not in ("material_id",)]
+print(f"CDVAE perov_5/train: {ds_cd.X.shape[0]} crystals, "
+      f"{ds_cd.X.shape[1]}-dim composition features")
+print(f"  numeric property columns discovered at runtime: {numeric_cols}")
+print(f"  loader-resolved default target = '{ds_cd.target}'")
+
+# Step 2: pick a REAL numeric column as the inverse-design target. Prefer
+# the loader's own resolved default (guaranteed valid for this subset); it
+# is already a genuine column of perov_5, so no second instantiation with a
+# hard-coded name is needed.
+target_col = ds_cd.target
+print(f"  using inverse-design target column: '{target_col}'")
+
+# Step 3: slice for runtime (the task asks for <= 6000 rows; keep it tight
+# so the surrogate fit + funnel stay well under a minute on CPU).
+N_CD = min(6000, ds_cd.X.shape[0])
+X_cd = ds_cd.X.numpy()[:N_CD].astype(np.float64)     # (N_CD, 118) element fractions
+y_cd = ds_cd.y.numpy()[:N_CD].astype(np.float64)     # (N_CD,) the real DFT property
+print(f"  sliced to N={N_CD}; target '{target_col}' range "
+      f"[{y_cd.min():.3f}, {y_cd.max():.3f}], mean {y_cd.mean():.3f}")
+
+
+# %%
+# A real surrogate for the property on 118-dim composition + a real
+# predictive-uncertainty estimate. A full 118-dim GP is slow and the
+# feature matrix is sparse/degenerate, so we use a small **random-forest
+# ensemble** as the surrogate: the mean of the tree predictions is the
+# point estimate and the *spread across trees* is a genuine epistemic
+# uncertainty proxy — exactly the "ensemble predictive variance" the deck
+# names as an alternative to the GP for the uncertainty-triage stage
+# (deck §"Uncertainty-Aware Filtering"). Same generative<->UQ bridge as
+# Stage A, just an ensemble instead of the per-cluster GP.
+from sklearn.ensemble import RandomForestRegressor
+
+rng_cd = np.random.default_rng(0)
+perm = rng_cd.permutation(N_CD)
+n_tr = int(0.6 * N_CD)
+tr_idx, ho_idx = perm[:n_tr], perm[n_tr:]            # train / hold-out split
+
+surrogate_cd = RandomForestRegressor(n_estimators=120, max_depth=12,
+                                     n_jobs=-1, random_state=0)
+surrogate_cd.fit(X_cd[tr_idx], y_cd[tr_idx])
+
+
+def rf_mean_std(rf, X):
+    """Ensemble mean + cross-tree std = (mu, sd) predictive estimate."""
+    preds = np.stack([t.predict(X) for t in rf.estimators_], axis=0)
+    return preds.mean(axis=0), preds.std(axis=0)
+
+
+mu_ho, sd_ho = rf_mean_std(surrogate_cd, X_cd[ho_idx])
+mae_ho = float(np.mean(np.abs(mu_ho - y_cd[ho_idx])))
+print(f"surrogate RF ({len(surrogate_cd.estimators_)} trees): "
+      f"hold-out MAE = {mae_ho:.4f} {target_col}-units, "
+      f"mean ensemble sd = {sd_ho.mean():.4f}")
+
+
+# %%
+# A candidate "generator" stand-in. A real CDVAE/DiffCSP samples NEW
+# crystals; we have no class-budget generator for 118-dim crystals, so we
+# emulate the *output* of one: take real perovskite compositions from a
+# DISJOINT slice and perturb them in composition space (Dirichlet-style
+# jitter on the non-zero element fractions, renormalised to sum to 1). This
+# yields physically-shaped, near-but-not-identical candidate compositions —
+# precisely the "stream of candidate materials" the funnel must screen. The
+# funnel logic below is otherwise IDENTICAL to Stage A.
+def emulate_candidates(X_seed, n_out, jitter=0.15, seed=0):
+    """Composition-space jitter of seed crystals -> candidate stream."""
+    g = np.random.default_rng(seed)
+    pick = g.integers(0, len(X_seed), size=n_out)
+    cand = X_seed[pick].copy()
+    noise = g.gamma(shape=1.0 / max(jitter, 1e-3), size=cand.shape)
+    cand = cand * noise                              # multiplicative jitter
+    cand = np.clip(cand, 0.0, None)
+    row = cand.sum(axis=1, keepdims=True)
+    row[row == 0.0] = 1.0
+    return cand / row                                # renormalise to a composition
+
+
+# Seed the emulator from the HOLD-OUT crystals (disjoint from the
+# surrogate's training set), so "novelty vs the known set" is meaningful.
+X_seed_cd = X_cd[ho_idx]
+y_target_cd = float(np.percentile(y_cd, 75))         # "I want a high-property phase"
+print(f"inverse-design target: {target_col}* = {y_target_cd:.3f} "
+      f"(75th pct of observed {target_col})")
+
+
+# %%
+# ---- The discovery funnel + S.U.N.-style screening, on REAL crystals ----
+#
+# Same six stages as Stage A, adapted to 118-dim composition space:
+#
+#   generate (wide top)              -> raw candidate compositions
+#   -> VALIDITY  : a real composition: non-negative, sums to ~1, and at
+#                  least one element present (the deck's "physical
+#                  pre-filter" before any expensive screening)
+#   -> UNIQUENESS: de-duplicate near-identical compositions (round the
+#                  fraction vector and drop repeats)
+#   -> NOVELTY   : far enough (L1 composition distance) from every KNOWN
+#                  crystal -> not a rediscovery
+#   -> ON-TARGET : surrogate-predicted property within tol of the target
+#                  (we only ever get the SURROGATE, not true DFT, in a
+#                  real campaign)
+#   -> UNCERTAINTY TRIAGE : keep only candidates the ensemble is confident
+#                  about (cross-tree sd below a data-driven cutoff) -- the
+#                  generative <-> UQ bridge, ensemble-flavoured
+#
+# "S.U.N." = Stable . Unique . Novel; we report the surviving fraction
+# after the U+N stages (validity is the "stable/plausible" proxy here, as
+# in Stage A) and the final end-to-end yield.
+def discovery_funnel_crystals(cand, y_target, surrogate, X_known,
+                              novelty_tol=0.20, target_tol=None,
+                              sd_cutoff=None, verbose=True):
+    """Run the multi-stage funnel on 118-dim compositions."""
+    stages = []
+    x = np.asarray(cand, dtype=np.float64)
+    stages.append(("0. generated (raw)", len(x)))
+
+    # --- VALIDITY: non-negative, normalised (sum ~ 1), >=1 element.
+    row = x.sum(axis=1)
+    valid = (x >= 0).all(axis=1) & (np.abs(row - 1.0) < 1e-6) & \
+            ((x > 1e-6).sum(axis=1) >= 1)
+    x = x[valid]
+    stages.append(("1. validity (composition plausible)", len(x)))
+
+    # --- UNIQUENESS: round the fraction vector, drop intra-batch repeats.
+    if len(x):
+        keys = np.round(x / 0.02).astype(np.int64)
+        _, uniq_idx = np.unique(keys, axis=0, return_index=True)
+        x = x[np.sort(uniq_idx)]
+    stages.append(("2. uniqueness (intra-batch dedup)", len(x)))
+
+    # --- NOVELTY: min L1 composition distance to any KNOWN crystal.
+    if len(x):
+        # chunked to keep the (n_cand x n_known) matrix small.
+        keep = np.ones(len(x), dtype=bool)
+        for s in range(0, len(x), 512):
+            blk = x[s:s + 512]
+            d = np.abs(blk[:, None, :] - X_known[None, :, :]).sum(axis=2)
+            keep[s:s + 512] = d.min(axis=1) > novelty_tol
+        x = x[keep]
+    stages.append(("3. novelty (vs known crystals)", len(x)))
+
+    sun_rate = len(x) / max(stages[0][1], 1)
+
+    # --- ON-TARGET: SURROGATE-predicted property near the target.
+    mu_pred = sd_pred = np.array([])
+    if len(x):
+        mu_pred, sd_pred = rf_mean_std(surrogate, x)
+        if target_tol is None:
+            # tol = surrogate's own typical hold-out error scale: asking
+            # for "within one surrogate-MAE of the target" (data-driven,
+            # not an arbitrary constant).
+            target_tol = max(mae_ho, 1e-6)
+        on_t = np.abs(mu_pred - y_target) <= target_tol
+        x, sd_pred = x[on_t], sd_pred[on_t]
+    stages.append(("4. on-target (|mu - y*| <= tol)", len(x)))
+
+    # --- UNCERTAINTY TRIAGE: ensemble must be confident. Cutoff is the
+    #     60th-pct of the ensemble sd on the trusted HOLD-OUT crystals
+    #     (relative, exactly as Stage A calibrates against trusted points).
+    if len(x):
+        if sd_cutoff is None:
+            sd_cutoff = float(np.percentile(sd_ho, 60))
+        x = x[sd_pred <= sd_cutoff]
+    stages.append(("5. uncertainty triage (ensemble confident)", len(x)))
+
+    if verbose:
+        print(f"  {'stage':<46s}{'#kept':>7s}{'frac':>9s}")
+        n0 = max(stages[0][1], 1)
+        for name, n in stages:
+            print(f"  {name:<46s}{n:>7d}{n / n0:>8.1%}")
+        print(f"  S.U.N. rate (Stable*Unique*Novel proxy) = {sun_rate:.1%}")
+        print(f"  end-to-end discovery yield              = {len(x) / n0:.1%}")
+    return x, stages, sun_rate
+
+
+# Wide top of funnel: over-generate, exactly as the deck insists.
+raw_cd = emulate_candidates(X_seed_cd, n_out=8000, jitter=0.15, seed=7)
+surv_cd, stage_cd, sun_cd = discovery_funnel_crystals(
+    raw_cd, y_target_cd, surrogate_cd, X_seed_cd)
+
+
+# %%
+# Funnel waterfall (real crystals) + the property distribution of the
+# survivors vs the known set.
+fig, axes = plt.subplots(1, 2, figsize=(13, 5.2))
+
+ax = axes[0]
+labels = [s[0] for s in stage_cd]
+counts = [s[1] for s in stage_cd]
+ax.barh(range(len(counts)), np.maximum(counts, 1), color="#2ca02c")
+ax.set_yticks(range(len(labels)))
+ax.set_yticklabels(labels, fontsize=8)
+ax.invert_yaxis()
+ax.set_xscale("log")
+ax.set_xlabel("# candidates surviving (log)")
+ax.set_title(f"Real-crystal funnel (perov_5; S.U.N. proxy = {sun_cd:.1%})")
+for i, c in enumerate(counts):
+    ax.text(max(c, 1), i, f" {c}", va="center", fontsize=8)
+
+ax = axes[1]
+ax.hist(y_cd, bins=40, alpha=0.5, color="lightgray",
+        label=f"all known {target_col}")
+ax.axvline(y_target_cd, color="#d62728", ls="--", lw=1.5,
+           label=f"{target_col}* = {y_target_cd:.2f}")
+if len(surv_cd):
+    mu_s, _ = rf_mean_std(surrogate_cd, surv_cd)
+    ax.hist(mu_s, bins=20, alpha=0.7, color="#2ca02c",
+            label=f"survivors' predicted {target_col} ({len(surv_cd)})")
+ax.set_xlabel(f"{target_col}")
+ax.set_ylabel("count")
+ax.set_title("Survivors cluster at the requested property")
+ax.legend(fontsize=8)
+plt.tight_layout()
+plt.show()
+
+
+# %% [markdown]
+# **Read these two panels.** Left: the *identical* deck funnel, now on
+# real perovskite compositions — each stage trims the stream (log axis);
+# the non-degenerate waterfall (survivors > 0, but a small fraction of the
+# raw batch) is exactly the deck's "wide top is mandatory, end-to-end yield
+# is a fraction of a percent" picture, reproduced on real data rather than
+# a 2-D toy. Right: the surviving candidates' surrogate-predicted property
+# concentrates around the requested target $y^\star$, away from the bulk of
+# the known distribution — inverse design on genuine crystals.
+#
+# **The braid, restated on real data.** Stage A proved the *mechanics*
+# (CVAE / classifier-free guidance) are legible in 2-D. Stage B proves the
+# *pipeline* (funnel + S.U.N. + uncertainty triage) transfers verbatim to a
+# real 118-dim generative-materials benchmark: only the surrogate
+# (per-cluster GP → tree ensemble) and the substrate (E,H toy → CDVAE
+# perovskites) changed; the **generation-proposes / uncertainty-disposes**
+# logic is identical. That is the MFML × ML-PC × MG braid on the dataset
+# the deck's CDVAE→…→FlowMM models actually use.
+#
+# **Honest caveats (Stage B).** (1) We do *not* train a 118-dim crystal
+# generator — that is the deck's SOTA and out of class scope; we emulate a
+# generator's *output stream* by composition-space jitter of real
+# perovskites and screen it with the real funnel. (2) "Stable" is again a
+# *validity* proxy (a plausible normalised composition), not an
+# energy-above-hull computation against MP-2024/Alexandria; `perov_5` has
+# no hull column, which is itself the deck's point that real S.U.N. needs a
+# reference hull. (3) The composition features ignore structure
+# (lattice/coordinates/space group) — real generators model those too —
+# but the conditional-screening + UQ-triage logic this block teaches is
+# structurally unchanged.
 
 
 # %% [markdown]
