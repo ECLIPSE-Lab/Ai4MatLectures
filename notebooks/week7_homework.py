@@ -1,7 +1,7 @@
 # %% [markdown]
-# # Week 8 — Homework (do BEFORE the Thursday exercise)
+# # Week 7 — Homework (do BEFORE the Thursday exercise)
 #
-# This notebook is the **mandatory warm-up** for the Week 8 in-class exercise.
+# This notebook is the **mandatory warm-up** for the Week 7 in-class exercise.
 # Working through it puts the bias-variance vocabulary in your hands and
 # gives you a working RF / gradient-boosting baseline on real materials data,
 # so Thursday can spend its 90 minutes on the harder question:

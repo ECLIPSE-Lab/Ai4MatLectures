@@ -1,20 +1,27 @@
 # %% [markdown]
-# # Week 8 — Generalization and ensembles
+# # Week 7 — Generalization and ensembles
 #
-# This week we braid three lectures:
+# This week the MFML lecture covers generalization, regularization, and
+# tree ensembles. MLPC Week 7 (time-series / process monitoring) is
+# cancelled (Pfingstdienstag), so the in-class session uses the
+# tensile-test process anchor here as a bridge into MLPC Week 8
+# (generalization, robustness, process windows). MG Week 7 is also
+# cancelled and the descriptor recap is folded into MG Week 8.
 #
-# 1. **MFML Unit 8**: Generalization, the bias-variance decomposition,
+# 1. **MFML Week 7**: Generalization, the bias-variance decomposition,
 #    regularization, and **tree ensembles** (random forests, gradient
 #    boosting). Theory anchor.
-# 2. **ML-PC Unit 7**: Generalization, robustness, and process windows —
-#    generalization in materials process data, group-CV, and sensitivity
-#    analysis on AM / process data. Lab-story anchor on `TensileTestDataset`
-#    at $T \in \{0, 400, 600\}\,^\circ$C. *(Note: the older "Time-series and
-#    process monitoring" material is now in
+# 2. **ML-PC Week 7 (cancelled) → bridge into Week 8**: Generalization,
+#    robustness, and process windows — generalization in materials
+#    process data, group-CV, and sensitivity analysis on AM / process
+#    data. Lab-story anchor on `TensileTestDataset` at
+#    $T \in \{0, 400, 600\}\,^\circ$C. *(Note: the older "Time-series
+#    and process monitoring" material is now in
 #    `ml_for_characterization_and_processing/unit07_time_series_supplementary/`
 #    — supplementary, not lectured.)*
-# 3. **MG Unit 6**: Local atomic environments and **SOAP descriptors**;
-#    grouped CV by structure family. Structure-property anchor.
+# 3. **MG Week 6 recap + bridge to Week 8**: Local atomic environments
+#    and **SOAP descriptors**; grouped CV by structure family. SOAP is
+#    introduced here so Week 8 can use it as the front-end to MACE-MP-0.
 #
 # **Red thread:** *Real materials models break when the distribution shifts
 # — across temperatures, prototypes, or microstructure families. This week
@@ -23,7 +30,7 @@
 # tabular materials data.*
 #
 # > **Pre-flight check.** This notebook **assumes** you have run
-# > `notebooks/week8_homework.py`. Block 1 picks up directly from your RF
+# > `notebooks/week7_homework.py`. Block 1 picks up directly from your RF
 # > and XGBoost results in Part C; we will not re-derive them.
 #
 # ## Agenda (90 min)

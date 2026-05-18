@@ -1,10 +1,10 @@
 ---
-title: "MG Week 8: Generalization and Learning Curves"
+title: "MG Week 9: Generalization and Learning Curves"
 subtitle: "Train/val/test protocol and decision boundaries on NanoindentationDataset"
 jupyter: python3
 ---
 
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/ECLIPSE-Lab/Ai4MatLectures/blob/main/notebooks/MG/week08_regression_nanoindentation.ipynb)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/ECLIPSE-Lab/Ai4MatLectures/blob/main/notebooks/MG/week09_regression_nanoindentation.ipynb)
 
 ## Learning Objectives
 

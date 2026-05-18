@@ -14,3 +14,10 @@ xgboost>=2.0
 torchvision>=0.16
 pymatgen>=2024.3
 matminer>=0.9
+# Week 8 (MG): SOAP fingerprints and the MACE-MP-0 universal MLIP.
+# MACE downloads ~50 MB of weights on first use; both packages are
+# optional for non-MG students (the Week 8 braided notebook guards
+# their import with try/except).
+dscribe>=2.1
+mace-torch>=0.3.6
+ase>=3.23

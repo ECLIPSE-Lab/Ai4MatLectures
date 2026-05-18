@@ -1,19 +1,20 @@
 # %% [markdown]
-# # Week 7 — Homework: Uncertainty and robustness (do BEFORE the Thursday exercise)
+# # Week 8 — Homework: Uncertainty and robustness (do BEFORE the Thursday exercise)
 #
 # This week braids three lectures' content onto a single dataset:
 #
-# 1. **MFML Unit 7** — Probabilistic view of learning. Aleatoric vs
+# 1. **MFML Week 8** — Probabilistic view of learning. Aleatoric vs
 #    epistemic uncertainty; Gaussian noise; MLE = MSE; MAP = regularised
 #    MLE; Bayes for predictive distributions; calibration; conformal
 #    prediction.
-# 2. **MG Week 8** — Regression and generalisation in materials data.
-#    Bias-variance trade-off, dataset-size vs model complexity, why split
-#    design matters more than a small accuracy gain.
-# 3. **ML-PC Unit 7** — Generalisation, robustness, and process windows.
+# 2. **ML-PC Week 8** — Generalisation, robustness, and process windows.
 #    Out-of-condition generalisation; sensitivity to noise and parameter
 #    drift; the *process window* as a region of input space where the
 #    model can still be trusted.
+# 3. **MG Week 8** — Local atomic environments + universal ML force
+#    fields. Bias-variance, split design, and small-data discipline
+#    transfer to materials regression; SOAP+MACE-MP-0 appear in the
+#    Thursday session.
 #
 # **Red thread.** *Fitting a regression model is making a probabilistic
 # claim: "given $\mathbf{x}$, my best guess is $\hat{y}$ with spread
@@ -58,6 +59,10 @@
 #    edge count + unique nearest-neighbour distance for FCC Cu, the RBF
 #    expansion plot, and the over-smoothing trajectory plot from manual
 #    message passing on the 3-atom toy graph.
+# 7. **Part G (MFML extensions, ~10 min):** the KL-between-Gaussians
+#    table for the three given pairs, and the Student-t vs Gaussian fit
+#    on the outlier-contaminated residuals (printed $\nu$ and the
+#    overlay plot).
 
 # %%
 # Standard imports for the whole homework. Same idiom as weeks 2-6.
@@ -805,3 +810,108 @@ except Exception as exc:  # noqa: BLE001 — stretch goal, optional dep
 # `r_cut` value break — which crystal classes need a chemistry-aware
 # cutoff like `CrystalNN`?). Pick whichever question kept you stuck
 # longest in F.1–F.3.
+
+
+# %% [markdown]
+# # Part G — MFML extensions: KL divergence and robust likelihoods
+#
+# *MFML W8 hits two ideas the rest of this homework only brushes past:
+# the **KL divergence** between two Gaussians (used later for the VAE
+# ELBO in Week 11), and **Student's t** as a heavy-tailed likelihood
+# that survives outliers better than a Gaussian. Each part is short —
+# the goal is to do the algebra once with your hands so the symbols are
+# yours when they reappear.*
+
+# %% [markdown]
+# ## G.1 — KL divergence between two univariate Gaussians
+#
+# The closed form (MFML §"KL divergence between Gaussians") is:
+#
+# $$\mathrm{KL}\!\left(\mathcal{N}(\mu_1, \sigma_1^2)\,\|\,\mathcal{N}(\mu_2, \sigma_2^2)\right)
+#  = \log\frac{\sigma_2}{\sigma_1}
+#  + \frac{\sigma_1^2 + (\mu_1 - \mu_2)^2}{2\sigma_2^2}
+#  - \frac{1}{2}.$$
+#
+# Implement it in one line, then evaluate it on three contrasting
+# pairs and read off the three intuitions the formula encodes:
+# (i) KL is zero when the distributions match, (ii) KL grows with the
+# squared mean shift, (iii) KL is *asymmetric* — swapping the
+# arguments generally changes the answer.
+
+# %%
+def kl_gaussian(mu1, sigma1, mu2, sigma2):
+    """KL( N(mu1, sigma1^2) || N(mu2, sigma2^2) ) — closed form."""
+    return (np.log(sigma2 / sigma1)
+            + (sigma1**2 + (mu1 - mu2)**2) / (2 * sigma2**2)
+            - 0.5)
+
+pairs = [
+    ("identical",         (0.0, 1.0), (0.0, 1.0)),
+    ("shifted mean",      (0.0, 1.0), (1.0, 1.0)),
+    ("scaled variance",   (0.0, 1.0), (0.0, 2.0)),
+]
+print(f"{'pair':<20s} {'KL(p||q)':>10s} {'KL(q||p)':>10s}")
+for name, p, q in pairs:
+    kl_pq = kl_gaussian(*p, *q)
+    kl_qp = kl_gaussian(*q, *p)
+    print(f"{name:<20s} {kl_pq:>10.4f} {kl_qp:>10.4f}")
+
+# %% [markdown]
+# **G.1 deliverable.** The three-row table above. **Check:** the
+# `identical` row prints 0.0 in both columns. The `shifted mean` row
+# is symmetric (both directions give the same number when only the
+# mean differs and the variances match). The `scaled variance` row is
+# *not* symmetric — that asymmetry is why the VAE ELBO uses
+# $\mathrm{KL}(q\|p)$ and not the other direction.
+
+# %% [markdown]
+# ## G.2 — Student's t fits the outliers that ruin a Gaussian
+#
+# MFML §"Robustness: Student's t". On real lab data the Gaussian
+# likelihood used in Part A breaks the moment a few measurements are
+# corrupted (sensor glitch, mislabeled specimen, transcription typo).
+# A Student's $t$-likelihood with low degrees-of-freedom $\nu$ has
+# heavier tails and pulls less hard on outliers.
+#
+# Take the degree-1 residuals from a single tensile temperature, inject
+# ~5 % outliers at 3× the natural noise std, then fit both a Gaussian
+# and a Student's $t$ by maximum likelihood and overlay them.
+
+# %%
+from scipy import stats
+
+x_raw, y_raw = TensileTestDataset(temperature=0).X.numpy().reshape(-1), TensileTestDataset(temperature=0).y.numpy().reshape(-1)
+beta = np.polyfit(x_raw, y_raw, deg=1)
+resid_clean = y_raw - np.polyval(beta, x_raw)
+
+rng_g = np.random.default_rng(7)
+mask = rng_g.random(len(resid_clean)) < 0.05
+outlier_kick = 3.0 * resid_clean.std() * rng_g.choice([-1, +1], size=mask.sum())
+resid_contam = resid_clean.copy()
+resid_contam[mask] = resid_contam[mask] + outlier_kick
+
+mu_g, sigma_g = stats.norm.fit(resid_contam)
+df_t, mu_t, sigma_t = stats.t.fit(resid_contam)
+print(f"Gaussian fit:        mu = {mu_g:+.3f}  sigma = {sigma_g:.3f}")
+print(f"Student-t fit:  nu = {df_t:.2f}  mu = {mu_t:+.3f}  sigma = {sigma_t:.3f}")
+
+grid = np.linspace(resid_contam.min() - 1, resid_contam.max() + 1, 400)
+fig, ax = plt.subplots(figsize=(6.5, 4))
+ax.hist(resid_contam, bins=30, density=True, alpha=0.4, label="contaminated residuals")
+ax.plot(grid, stats.norm.pdf(grid, mu_g, sigma_g), lw=2, label="Gaussian MLE")
+ax.plot(grid, stats.t.pdf(grid, df_t, mu_t, sigma_t), lw=2, label=f"Student-t MLE (ν={df_t:.1f})")
+ax.set_xlabel("residual"); ax.set_ylabel("density")
+ax.set_title("G.2 — Student-t survives the 5 % outlier injection")
+ax.legend(); plt.tight_layout(); plt.show()
+
+# %% [markdown]
+# **G.2 deliverable.** The printed $\nu$ value plus the overlay plot.
+# **Check:** the Student-$t$ MLE should land at $\nu \lesssim 5$ (heavy
+# tails are needed); $\sigma_t$ should be *smaller* than $\sigma_g$
+# because the Gaussian is forced to inflate its scale to cover the
+# outliers, while the $t$ pushes them into the tail.
+#
+# **Reflection (one line).** Which of your tensile-data predictions
+# from Part C would have benefited most from a Student-$t$ likelihood:
+# the same-temperature 80/20 split, or the across-temperature split?
+# Why?
