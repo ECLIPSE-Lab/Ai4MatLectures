@@ -23,7 +23,7 @@ import re
 import warnings
 from pathlib import Path
 from typing import Optional
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 import numpy as np
 import torch
@@ -186,7 +186,10 @@ def download_if_missing(task: str, root: str) -> None:
     url = meta["url"]
     tmp = dest.with_suffix(".gz.partial")
     try:
-        with urlopen(url, timeout=60) as response:
+        # materialsproject.org rejects the default Python urllib User-Agent
+        # (HTTP 403); send a browser-like UA so the fetch works for students.
+        req = Request(url, headers={"User-Agent": "Mozilla/5.0 (ai4mat dataset loader)"})
+        with urlopen(req, timeout=60) as response:
             total = int(response.headers.get("Content-Length", 0)) or None
             with open(tmp, "wb") as fh, tqdm(
                 total=total, unit="B", unit_scale=True, desc=task
