@@ -4,6 +4,14 @@ project:
   # Run all notebooks from the project root so relative paths like
   # `data/NEU-DET/...` resolve the same way they do for `pytest` / `python -m`.
   execute-dir: project
+  # Render everything by default, but never render docs/ — it holds only
+  # internal planning/spec notes (docs/superpowers/**), not site pages.
+  # `quarto render` (the GitHub Pages workflow) would otherwise try to
+  # build those .md files. (Quarto honours the `!docs/**` glob form here;
+  # `!docs/superpowers/**` is silently ignored by the render matcher.)
+  render:
+    - "**/*"
+    - "!docs/**"
 
 website:
   title: "Ai4MatLectures"
