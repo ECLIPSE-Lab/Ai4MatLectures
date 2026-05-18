@@ -68,7 +68,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
 
-from ai4mat.datasets import IsingDataset, CrystalGraphsDataset
+from ai4mat.datasets import IsingDataset, CrystalGraphsDataset, MatBenchDataset
 
 np.random.seed(0)
 torch.manual_seed(0)
@@ -548,6 +548,48 @@ print(f"  => both poolings are permutation invariant; only *mean* is "
 # **mean** pooling so the per-atom energy stays invariant under cell
 # doubling. You are not asked to build the GNN here — only to understand
 # why a plain vector model cannot, and what symmetry the pooling encodes.
+
+
+# %% [markdown]
+# ### Part D.3 — The same ceiling on a *real* benchmark (one cell)
+#
+# D.1 showed the composition-collision on the *toy* dataset. To see it is
+# not a synthetic artefact, here is one light real-data baseline:
+# `matbench_perovskites` (~19k DFT perovskites from Materials Project).
+# `mb.X` is a fixed 118-dim **element-fraction** vector — composition
+# only, no structure — and `mb.y` is the DFT formation energy. We fit a
+# trivial Ridge model on a seeded 3000-row slice. This is the
+# **composition-only number** to put next to Thursday's structure-aware
+# crystal-graph GNN (main notebook Block 5b): the GNN sees the graph;
+# this baseline only sees the chemistry, so it cannot resolve two
+# perovskites that differ only in structure. Same wall as D.1, on real
+# DFT data. (First run downloads ~a few MB and caches under data/.)
+
+# %%
+from sklearn.linear_model import Ridge
+from sklearn.metrics import mean_absolute_error
+
+mb = MatBenchDataset(task="matbench_perovskites", root="data/matbench",
+                     download=True)
+_rng_mb = np.random.default_rng(0)
+_k_mb = 3000
+_sel_mb = _rng_mb.permutation(len(mb.X))[:_k_mb]
+Xmb = mb.X.numpy()[_sel_mb]
+ymb = mb.y.numpy()[_sel_mb]
+_sp = int(0.8 * _k_mb)
+mb_baseline = Ridge(alpha=1.0).fit(Xmb[:_sp], ymb[:_sp])
+mae_mb = float(mean_absolute_error(ymb[_sp:], mb_baseline.predict(Xmb[_sp:])))
+print(f"Part D.3 — matbench_perovskites, composition-only Ridge baseline:")
+print(f"  full dataset {tuple(mb.X.shape)}, seeded {_k_mb}-row slice, "
+      f"feature dim {Xmb.shape[1]} (element fractions, NO structure)")
+print(f"  test MAE = {mae_mb:.4f} eV/atom   "
+      f"(predict-the-mean ref {ymb[_sp:].std():.4f})")
+print(f"  => this is the composition-only number Thursday's "
+      f"crystal-graph GNN\n     (main notebook Block 5b) must beat. It "
+      f"learns the chemistry trend but\n     is structurally blind: two "
+      f"perovskites with the same composition and\n     different "
+      f"structure get the same input. The graph point in Part D, on\n"
+      f"     real data.")
 
 
 # %% [markdown]

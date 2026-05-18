@@ -65,7 +65,8 @@ import matplotlib.pyplot as plt
 from sklearn.linear_model import Ridge
 from sklearn.metrics import mean_absolute_error, r2_score
 
-from ai4mat.datasets import IsingDataset, CrystalGraphsDataset, TensileTestDataset
+from ai4mat.datasets import (IsingDataset, CrystalGraphsDataset,
+                             TensileTestDataset, MatBenchDataset, QM9Dataset)
 
 np.random.seed(0)
 torch.manual_seed(0)
@@ -1013,6 +1014,156 @@ plt.tight_layout(); plt.show()
 #   Pretrain a GNN on one property, freeze it, fit a linear head on a new
 #   target: that is the MG-U9 §43 recipe, and the bridge to MG-U10 —
 #   *"Unit 9 produces the embedding; Unit 10 studies it."*
+
+
+# %% [markdown]
+# ## Block 6c — The composition ceiling on a *real* benchmark
+#
+# Blocks 5/5a/5b and 6 made the MG-U9 thesis concrete on the *toy*
+# `CrystalGraphsDataset`: a composition-only Magpie+MLP cannot resolve two
+# prototypes with the same chemistry, so the structure-aware GNN beats it.
+# A fair sceptic asks: *is that an artefact of the synthetic data?* Here
+# we close that loop on a **real benchmark** — `matbench_perovskites`
+# (~19k DFT-relaxed perovskites from Materials Project, formation energy
+# in eV/atom). The loader gives `mb.X`, a fixed 118-dim **element-fraction
+# vector** (composition only — no structure), and `mb.y`, the DFT energy.
+#
+# We fit the *same* cheap models we used elsewhere (Ridge, and the small
+# `MagpieMLP` architecture) on composition alone, on a seeded
+# train/test split. The point is **not** to beat the GNN — it *cannot*,
+# because two perovskites with the same chemistry but different
+# octahedral tilt / cation order have the *same* `mb.X`. The point is
+# that this composition-only error is the empirical realisation, on real
+# DFT data, of the slide-07 ceiling the toy Block 6 demonstrated: the
+# real-data composition model lands at an MAE that a structure-aware
+# graph model (Block 5b's CGCNN, here on its own toy units) is built to
+# get *under*. Same lesson, no synthetic crutch.
+
+# %%
+mb = MatBenchDataset(task="matbench_perovskites", root="data/matbench",
+                     download=True)
+# Slice for CPU runtime (no subsample arg exists — slice .X/.y directly).
+_mb_rng = np.random.default_rng(0)
+_mb_k = 4000
+_mb_sel = _mb_rng.permutation(len(mb.X))[:_mb_k]
+Xmb = mb.X.numpy()[_mb_sel]                       # (4000, 118) composition only
+ymb = mb.y.numpy()[_mb_sel]                       # (4000,) eV/atom
+_mb_split = int(0.8 * _mb_k)
+Xmb_tr, Xmb_te = Xmb[:_mb_split], Xmb[_mb_split:]
+ymb_tr, ymb_te = ymb[:_mb_split], ymb[_mb_split:]
+print(f"Block 6c — MatBenchDataset('matbench_perovskites'): "
+      f"full {tuple(mb.X.shape)}, using a seeded {_mb_k}-row slice")
+print(f"  composition-only feature dim = {Xmb.shape[1]}  (element fractions; "
+      f"no structure)")
+print(f"  train/test = {Xmb_tr.shape[0]}/{Xmb_te.shape[0]}   "
+      f"target std (predict-the-mean MAE ref) = {ymb_te.std():.4f} eV/atom")
+
+
+# %%
+# Same Ridge head we used for the frozen-trunk transfer in Block 6 (3),
+# now on raw composition; plus the same small MagpieMLP architecture from
+# Block 6 (2). Both are composition-only by construction.
+mb_ridge = Ridge(alpha=1.0).fit(Xmb_tr, ymb_tr)
+mae_mb_ridge = float(mean_absolute_error(ymb_te, mb_ridge.predict(Xmb_te)))
+r2_mb_ridge = float(r2_score(ymb_te, mb_ridge.predict(Xmb_te)))
+
+torch.manual_seed(0)
+_mu_mb, _sd_mb = Xmb_tr.mean(0), Xmb_tr.std(0) + 1e-8
+mb_mlp = MagpieMLP(Xmb_tr.shape[1])
+_opt_mb = torch.optim.AdamW(mb_mlp.parameters(), lr=5e-3, weight_decay=1e-5)
+_Xmb_tr_t = torch.tensor((Xmb_tr - _mu_mb) / _sd_mb, dtype=torch.float32)
+_Xmb_te_t = torch.tensor((Xmb_te - _mu_mb) / _sd_mb, dtype=torch.float32)
+_ymb_tr_t = torch.tensor(ymb_tr, dtype=torch.float32)
+for _ in range(300):
+    _opt_mb.zero_grad()
+    _loss_mb = F.mse_loss(mb_mlp(_Xmb_tr_t), _ymb_tr_t)
+    _loss_mb.backward(); _opt_mb.step()
+mb_mlp.eval()
+with torch.no_grad():
+    y_mb_mlp = mb_mlp(_Xmb_te_t).numpy()
+mae_mb_mlp = float(mean_absolute_error(ymb_te, y_mb_mlp))
+r2_mb_mlp = float(r2_score(ymb_te, y_mb_mlp))
+
+print(f"Block 6c — composition-only on REAL matbench_perovskites "
+      f"(MAE in eV/atom):")
+print(f"  {'model':<37} {'MAE':>8}   {'R^2':>6}")
+print(f"  {'Ridge on element fractions':<37} {mae_mb_ridge:>8.4f}   "
+      f"{r2_mb_ridge:>6.3f}")
+print(f"  {'MagpieMLP on element fractions':<37} {mae_mb_mlp:>8.4f}   "
+      f"{r2_mb_mlp:>6.3f}")
+print(f"  {'(predict-the-mean reference)':<37} {ymb_te.std():>8.4f}")
+print(f"  -- for contrast, the toy structure-aware CGCNN (Block 5b, its "
+      f"own\n     units) reached MAE {mae_cgcnn:.4f} eV/atom vs its "
+      f"composition-only\n     Magpie+MLP at {mae_magpie:.4f}. On THIS real "
+      f"benchmark the composition\n     vector is the *entire* input, so "
+      f"two perovskites that differ only in\n     structure (tilt / cation "
+      f"order) are indistinguishable -> a hard floor\n     no "
+      f"composition-only model can break. That floor is exactly the "
+      f"MG-U9\n     slide-07 ceiling, now on real DFT data: the empirical "
+      f"payoff of the\n     Block-5 thesis, *confirming* it (a "
+      f"structure-aware graph model is the\n     way under this floor — "
+      f"not contradicting the GNN lesson).")
+
+
+# %% [markdown]
+# **Reading Block 6c.** The composition-only models on real
+# `matbench_perovskites` beat predict-the-mean (they *do* learn the
+# chemistry trend) but plateau well above what a structure-aware graph
+# network achieves on this task in the literature — the published
+# CGCNN/MEGNet numbers on this benchmark are several-fold lower MAE than a
+# composition-only fit. We deliberately do **not** train a GNN on the real
+# graphs here (it needs `pymatgen` structures and minutes of CPU, out of
+# scope for this notebook); the from-scratch GNN lesson lives in Block
+# 5/5a/5b on units we control. The takeaway is the one the homework Part D
+# states: *a crystal is a graph, not a vector — composition alone cannot
+# tell polymorphs apart* — and here it is, measured on real DFT data, not
+# just asserted on a toy.
+
+
+# %% [markdown]
+# ## Block 6d — Molecules vs crystals: same recipe, different inductive bias
+#
+# MG-U9 names **QM9** as the molecular counterpart of the
+# crystal-property task. `QM9Dataset` featurises ~134k small organic
+# molecules into a tiny 7-vector (atom-type counts + heavy/total atom
+# count) and exposes 19 quantum-chemical targets; we predict the
+# HOMO-LUMO `gap`. *Note:* `QM9Dataset.__init__` featurises the full CSV
+# every construction (tens of seconds, ~30 MB) — we slice **after**.
+#
+# Run the *same* Ridge recipe. The point is the contrast: on crystals the
+# correct symmetry is a periodic graph with permutation-invariant atom
+# pooling (Block 5); on molecules the same composition-style count vector
+# already captures a lot of the gap, because molecular size/saturation is
+# a strong gap predictor — but it still misses 3-D conformation. Same
+# code, different inductive bias: the data type dictates the architecture,
+# not the other way round.
+
+# %%
+qm = QM9Dataset(target="gap", root="data/qm9", download=True)
+_qm_k = 4000
+_qm_rng = np.random.default_rng(0)
+_qm_sel = _qm_rng.permutation(len(qm.X))[:_qm_k]   # slice AFTER full featurize
+Xqm = qm.X.numpy()[_qm_sel]                         # (4000, 7) count features
+yqm = qm.y.numpy()[_qm_sel]                         # (4000,) HOMO-LUMO gap
+_qm_split = int(0.8 * _qm_k)
+Xqm_tr, Xqm_te = Xqm[:_qm_split], Xqm[_qm_split:]
+yqm_tr, yqm_te = yqm[:_qm_split], yqm[_qm_split:]
+
+qm_ridge = Ridge(alpha=1.0).fit(Xqm_tr, yqm_tr)
+mae_qm = float(mean_absolute_error(yqm_te, qm_ridge.predict(Xqm_te)))
+r2_qm = float(r2_score(yqm_te, qm_ridge.predict(Xqm_te)))
+
+print(f"Block 6d — QM9 'gap', same Ridge recipe on a seeded {_qm_k}-row "
+      f"slice:")
+print(f"  feature dim = {Xqm.shape[1]} (atom-type + heavy/total counts), "
+      f"target = HOMO-LUMO gap")
+print(f"  Ridge MAE = {mae_qm:.4f}   R^2 = {r2_qm:.3f}   "
+      f"(predict-the-mean ref {yqm_te.std():.4f})")
+print(f"  -> molecules vs crystals: identical code, but the right "
+      f"inductive bias\n     differs. A count vector carries real signal "
+      f"for a molecular gap, yet\n     still cannot see 3-D conformation; "
+      f"a crystal needs the periodic graph\n     of Block 5. The data "
+      f"type, not the model, sets the symmetry.")
 
 
 # %% [markdown]
