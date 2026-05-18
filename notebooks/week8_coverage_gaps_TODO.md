@@ -182,6 +182,19 @@ add before the session · **[P2]** core but partially covered — extend ·
 
 ## MG — Local atomic environments
 
+- [x] **[P2] MLIP energy+force on a real interatomic dataset + the correlated-sample
+  trap.** *(Closed 2026-05-18 — Block 8d, self-study.)* rMD17 (benzene) had no
+  host block in this notebook (SOAP/MLIP force-matching moved to MG Week 6;
+  Week 8's MG content is graph reps). Added a self-contained Block 8d: tiny
+  invariant-feature (pairwise-distance) MLP energy regressor with honest
+  disjoint train/held-out error, the rMD17 `n_samples>1000` `UserWarning`,
+  a measured energy-autocorrelation diagnostic (showing the shipped release is
+  already decorrelated), a clearly-labelled *constructed* pseudo-trajectory
+  demonstrating the naive-random-vs-trajectory-block optimism gap, and a
+  force-norm magnitude diagnostic. This is the MLIP-modality instance of the
+  cross-cutting "your test point looked in-distribution but wasn't" braid and
+  ties the correlated-split leakage to Week 8's generalisation/robustness theme
+  (same failure as the Block 1b leave-condition-out gap, one modality out).
 - [ ] **[P1] The descriptor ladder + mandatory composition-only (Magpie) baseline.**
   This is *the* organising spine of the MG deck — must-know statement #1,
   repeated ~6×: "every materials-ML project reports a composition-only Magpie

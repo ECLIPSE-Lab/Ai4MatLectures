@@ -51,6 +51,7 @@
 # | 6b | 10 | Robustness: noise-injection envelope + outlier (MSE vs Huber) |
 # | 7 | 10 | Process windows: where is the model trustworthy? |
 # | 8 | ~26 | MG anchor — graph-based crystal reps (GNN, PBC, RBF, ranking) |
+# | 8d | self-study | rMD17 MLIP energy+force — the correlated-sample trap |
 # | 9 | 12 | Student exercises (3 core + 1 stretch) |
 #
 # > Block 8 is the MG Week 8 anchor: a hand-rolled crystal-graph model
@@ -1675,6 +1676,275 @@ print("Take-home: match the readout to the target's extensivity. Per-atom "
 # look like on a fixed-size tabular input vs a variable-size graph, and
 # where does it stop being a good prior? *(No expected answer — this is
 # the synthesis exercise for the MG Week 8 graph lecture.)*
+
+
+# %% [markdown]
+# ## Block 8d (self-study) — MLIP energy regression on rMD17, and why ≤ 1000 samples
+#
+# *(Self-study add-on. The MG Week 8 lecture is graph **representations**;
+# SOAP/MLIP force-matching moved to MG Week 6. This block is the Week-8
+# tie-in: an MLIP-style energy regressor exists only to make one
+# generalisation point concrete — the **correlated-sample trap** — which
+# is the same leakage failure as Block 1b, one modality further out.)*
+#
+# `rMD17` is 100 000 DFT snapshots per molecule from an MD trajectory.
+# Frames a few femtoseconds apart are near-identical structures with
+# near-identical energies. The dataset authors therefore warn that **no
+# more than 1000 should be used together** — the `RMD17Dataset` API emits
+# a `UserWarning` above that and defends you with a deterministic
+# permutation plus a *disjoint* `split="test"` block.
+#
+# We do three things, all seeded, all CPU, < ~60 s total:
+#
+# 1. fit a tiny MLP on **rotation/translation-invariant** features
+#    (pairwise interatomic distances — raw flattened coordinates are not
+#    invariant and a small net wastes capacity learning that) and report
+#    honest train vs disjoint held-out energy error;
+# 2. load 5000 frames (triggering the warning), and *measure* the stored
+#    frames' energy autocorrelation — it is essentially zero, because the
+#    public rMD17 release is **already decorrelated** by its authors. The
+#    lesson is not "the file is dangerous" but "you cannot eyeball this —
+#    you have to measure it, and you must trust the dataset's split rather
+#    than roll your own naive random split on a *raw* trajectory";
+# 3. to show what the trap looks like *when the correlation is present*,
+#    we **construct** a pseudo-trajectory from the same frames (ordered by
+#    a smooth structural coordinate so neighbours are genuine
+#    near-duplicates) and show a naive random split scoring optimistically
+#    versus an honest trajectory-block split — exactly the Block 1b
+#    leave-condition-out story, now for an interatomic potential.
+
+# %%
+import warnings
+from itertools import combinations
+
+from ai4mat.datasets import RMD17Dataset
+
+RMD17_SEED = 0
+RMD17_MOL = "benzene"  # 12 atoms; small + fast on CPU
+
+
+def rmd17_distance_features(coords_np: np.ndarray) -> np.ndarray:
+    """(N, n_atoms, 3) -> (N, n_atoms*(n_atoms-1)/2) sorted-pair distances.
+
+    Interatomic distances are invariant to global rotation and translation
+    (and, for a single fixed molecule, to atom identity since the columns
+    are in a fixed order). This is the cheapest honest MLIP descriptor.
+    """
+    n_at = coords_np.shape[1]
+    ij = np.array(list(combinations(range(n_at), 2)))
+    diff = coords_np[:, ij[:, 0], :] - coords_np[:, ij[:, 1], :]
+    return np.linalg.norm(diff, axis=2)
+
+
+def fit_tiny_mlip(X_fit, y_fit, evals, *, epochs: int, seed: int = RMD17_SEED):
+    """Tiny 2-hidden-layer MLP energy regressor. Returns RMSE on each eval.
+
+    Energies are huge (~ -1.45e5 kcal/mol); we centre by the training mean
+    so the net only has to learn the conformational *spread*. Features are
+    standardised with a scaler fit on the training split only (Block 1b
+    discipline: the scaler is part of the model)."""
+    scaler = StandardScaler().fit(X_fit)
+    y_bar = float(y_fit.mean())
+    torch.manual_seed(seed)
+    net = nn.Sequential(
+        nn.Linear(X_fit.shape[1], 128), nn.SiLU(),
+        nn.Linear(128, 128), nn.SiLU(),
+        nn.Linear(128, 1),
+    )
+    opt = torch.optim.Adam(net.parameters(), lr=5e-3, weight_decay=1e-6)
+    Xz = torch.tensor(scaler.transform(X_fit), dtype=torch.float32)
+    yz = torch.tensor(y_fit - y_bar, dtype=torch.float32).unsqueeze(1)
+    for _ in range(epochs):
+        opt.zero_grad()
+        F.mse_loss(net(Xz), yz).backward()
+        opt.step()
+    out = []
+    with torch.no_grad():
+        for Xv, yv in evals:
+            pv = net(torch.tensor(scaler.transform(Xv), dtype=torch.float32))
+            pred = pv.squeeze(1).numpy() + y_bar
+            out.append(float(np.sqrt(mean_squared_error(yv, pred))))
+    return out
+
+
+# Honest, disciplined split: the API's deterministic train block and its
+# *disjoint* held-out block. 1000 each — the rMD17-recommended ceiling.
+rmd17_tr = RMD17Dataset(molecule=RMD17_MOL, n_samples=1000, split="train",
+                        seed=RMD17_SEED, root="data/rmd17", download=True)
+rmd17_te = RMD17Dataset(molecule=RMD17_MOL, n_samples=1000, split="test",
+                        seed=RMD17_SEED, root="data/rmd17", download=True)
+
+X_rmd_tr = rmd17_distance_features(rmd17_tr.coords.numpy())
+X_rmd_te = rmd17_distance_features(rmd17_te.coords.numpy())
+y_rmd_tr = rmd17_tr.y.numpy().astype(np.float64)
+y_rmd_te = rmd17_te.y.numpy().astype(np.float64)
+
+rmd_rmse_tr, rmd_rmse_te = fit_tiny_mlip(
+    X_rmd_tr, y_rmd_tr,
+    [(X_rmd_tr, y_rmd_tr), (X_rmd_te, y_rmd_te)],
+    epochs=400,
+)
+print("Block 8d — tiny MLIP energy regressor on rMD17 "
+      f"({RMD17_MOL}, {rmd17_tr.n_atoms} atoms, "
+      f"{X_rmd_tr.shape[1]} distance features):")
+print(f"  energy std on train block      : {y_rmd_tr.std():7.4f} kcal/mol "
+      f"(the trivial 'predict the mean' baseline)")
+print(f"  train RMSE                     : {rmd_rmse_tr:7.4f} kcal/mol")
+print(f"  disjoint held-out RMSE         : {rmd_rmse_te:7.4f} kcal/mol")
+print(f"  generalisation gap (held/train): {rmd_rmse_te / rmd_rmse_tr:7.1f}x")
+
+
+# %% [markdown]
+# The near-zero train RMSE with a ~10x larger held-out RMSE is the *same*
+# overfitting signature as the polynomial U-curve in Block 1 — the model
+# memorises the training conformers. The held-out number is honest **only
+# because the API handed us a disjoint block**. The next cell shows what
+# goes wrong the moment you stop trusting that discipline.
+
+# %%
+# Load well past the recommended ceiling. The dataset warns; we keep the
+# message and then *measure* whether the hazard it warns about is actually
+# present in the stored frames.
+with warnings.catch_warnings(record=True) as caught:
+    warnings.simplefilter("always")
+    rmd17_big = RMD17Dataset(molecule=RMD17_MOL, n_samples=5000, split="train",
+                             seed=RMD17_SEED, root="data/rmd17", download=True)
+    rmd17_warn = [str(w.message) for w in caught
+                  if issubclass(w.category, UserWarning)]
+
+X_big = rmd17_distance_features(rmd17_big.coords.numpy())
+y_big = rmd17_big.y.numpy().astype(np.float64)
+
+# Energy autocorrelation at small lags in the *stored* frame order.
+y_c = y_big - y_big.mean()
+stored_ac = [float(np.corrcoef(y_c[:-L], y_c[L:])[0, 1]) for L in (1, 2, 5, 10)]
+
+print("Block 8d — n_samples = 5000 (past the rMD17 ceiling):")
+print(f"  UserWarning raised             : {bool(rmd17_warn)}")
+if rmd17_warn:
+    print(f"  -> {rmd17_warn[0].splitlines()[0]}")
+print(f"  stored-frame energy autocorr    "
+      f"(lag 1,2,5,10): {[round(a, 4) for a in stored_ac]}")
+print("  => essentially zero: the public rMD17 release is ALREADY")
+print("     decorrelated by its authors. The naive-random-split trap")
+print("     therefore does NOT reproduce on the file as shipped — which")
+print("     is precisely why you must MEASURE autocorrelation and trust")
+print("     the dataset's split, not assume a raw MD dump behaves nicely.")
+
+
+# %% [markdown]
+# So we cannot demonstrate the trap on the shipped order — there is no
+# correlation left to exploit, and fabricating one would be dishonest.
+# Instead we **construct** a pseudo-trajectory from the very same 5000
+# frames: order them along the leading structural principal component, so
+# consecutive "frames" are now genuine near-duplicates (lag-1 energy
+# autocorrelation rises). This is a *labelled illustration of the
+# mechanism*, not a property of the dataset. We use a 1-nearest-neighbour
+# regressor — the sharpest possible memoriser — to make the gap visible:
+#
+# - **naive random 80/20** of the pseudo-trajectory: almost every test
+#   frame has a near-duplicate sitting in the training set → flatteringly
+#   low error;
+# - **trajectory-block split** (first 80% train, last 20% sealed): the
+#   held-out region is genuinely new structure → the honest error.
+
+# %%
+# Leading structural PC as a smooth pseudo-time coordinate.
+X_centered = X_big - X_big.mean(axis=0)
+_, _, Vt = np.linalg.svd(X_centered, full_matrices=False)
+pseudo_time = X_centered @ Vt[0]
+traj_order = np.argsort(pseudo_time)
+X_traj = X_big[traj_order]
+y_traj = y_big[traj_order]
+
+y_tc = y_traj - y_traj.mean()
+pseudo_ac1 = float(np.corrcoef(y_tc[:-1], y_tc[1:])[0, 1])
+
+
+def knn1_rmse(X_fit, y_fit, X_val, y_val):
+    """1-NN energy RMSE — the maximally optimistic memoriser."""
+    from sklearn.neighbors import KNeighborsRegressor
+    knn = KNeighborsRegressor(n_neighbors=1).fit(X_fit, y_fit)
+    return float(np.sqrt(mean_squared_error(y_val, knn.predict(X_val))))
+
+
+N_traj = len(y_traj)
+cut = int(0.8 * N_traj)
+rng_rmd = np.random.default_rng(RMD17_SEED)
+perm = rng_rmd.permutation(N_traj)
+
+rmse_random = knn1_rmse(X_traj[perm[:cut]], y_traj[perm[:cut]],
+                        X_traj[perm[cut:]], y_traj[perm[cut:]])
+rmse_block = knn1_rmse(X_traj[:cut], y_traj[:cut],
+                       X_traj[cut:], y_traj[cut:])
+
+print("Block 8d — the correlated-sample trap (constructed pseudo-trajectory):")
+print(f"  pseudo-traj lag-1 energy autocorr : {pseudo_ac1:+.3f} "
+      f"(vs ~0 in shipped order — correlation now present by construction)")
+print(f"  1-NN naive random-split    RMSE   : {rmse_random:7.4f} kcal/mol  "
+      f"(OPTIMISTIC)")
+print(f"  1-NN trajectory-block      RMSE   : {rmse_block:7.4f} kcal/mol  "
+      f"(HONEST)")
+print(f"  optimism factor                   : {rmse_block / rmse_random:7.2f}x")
+print("  Lesson (Week 8 generalisation/robustness): a random split over a")
+print("  correlated trajectory measures interpolation between near-")
+print("  duplicates, not generalisation to new structure. Same failure as")
+print("  the leave-T-out gap in Block 1b — one modality further out.")
+
+# %%
+fig, axes = plt.subplots(1, 2, figsize=(11, 4.2))
+
+ax = axes[0]
+labels = ["naive\nrandom split", "trajectory-block\nsplit"]
+vals = [rmse_random, rmse_block]
+bars = ax.bar(labels, vals, color=["tab:red", "tab:blue"], alpha=0.85)
+for b, v in zip(bars, vals):
+    ax.text(b.get_x() + b.get_width() / 2, v, f"{v:.3f}",
+            ha="center", va="bottom", fontsize=10)
+ax.set_ylabel("1-NN energy RMSE (kcal/mol)")
+ax.set_title("Block 8d — correlated-sample trap\n(constructed pseudo-trajectory)")
+ax.grid(alpha=0.3, axis="y")
+
+ax = axes[1]
+per_atom_fnorm = np.linalg.norm(rmd17_tr.forces.numpy(), axis=2).reshape(-1)
+ax.hist(per_atom_fnorm, bins=50, color="tab:green", alpha=0.8)
+ax.axvline(np.median(per_atom_fnorm), color="k", ls="--",
+           label=f"median {np.median(per_atom_fnorm):.1f}")
+ax.set_xlabel(r"per-atom force norm (kcal mol$^{-1}$ Å$^{-1}$)")
+ax.set_ylabel("count")
+ax.set_title("Block 8d — rMD17 force-magnitude diagnostic\n"
+             f"({RMD17_MOL}, 1000 train frames)")
+ax.legend()
+ax.grid(alpha=0.3, axis="y")
+
+plt.tight_layout()
+plt.show()
+
+print("Block 8d — force-norm diagnostic (no force-matching trained):")
+print(f"  per-atom |F| mean / median / 95pct / max : "
+      f"{per_atom_fnorm.mean():6.2f} / {np.median(per_atom_fnorm):6.2f} / "
+      f"{np.percentile(per_atom_fnorm, 95):6.2f} / "
+      f"{per_atom_fnorm.max():6.2f}  kcal/mol/Å")
+print("  Forces are O(30) kcal/mol/Å with a heavy tail — an energy-only")
+print("  model is blind to this. Closing the gap (a force-matching loss")
+print("  on -dE/dx) is the MG Week 6 SOAP/MLIP task; here it only sizes")
+print("  the signal an energy regressor ignores.")
+
+
+# %% [markdown]
+# **Block 8d take-home.**
+#
+# 1. **The split is part of the experiment.** On a correlated trajectory
+#    a random 80/20 measures interpolation between near-duplicate frames,
+#    not generalisation — identical in spirit to the leave-condition-out
+#    leakage of Block 1b, now for an interatomic potential.
+# 2. **Measure, don't assume.** The shipped rMD17 frames are *already*
+#    decorrelated; the only honest way to know is to compute the
+#    autocorrelation and to use the dataset's disjoint `split="test"`.
+# 3. **Energy-only is half a potential.** Forces are O(30) kcal/mol/Å;
+#    an energy regressor never sees them. Force-matching is the MG
+#    Week 6 reading task — Block 8d only quantifies what is being skipped.
+
 
 # %% [markdown]
 # # Student exercises (Block 9 — ~12 min)
