@@ -894,11 +894,10 @@ labels = {"ei": "Expected Improvement", "ucb": "UCB ($\\beta=2$)",
           "thompson": "Thompson", "maxvar": "argmax $\\sigma$ (Block 5 rule)",
           "random": "random"}
 
-regret_curves, best_curves, recall_curves = {}, {}, {}
+regret_curves, recall_curves = {}, {}
 for s in strategies:
     _runs = [run_discovery(s, n_rounds=N_ROUNDS, seed=k) for k in range(N_SEEDS)]
     regret_curves[s] = np.stack([r[1] for r in _runs])
-    best_curves[s]   = np.stack([r[0] for r in _runs])
     recall_curves[s] = np.stack([r[2] for r in _runs])
 
 print(f"Block 5b — {N_SEEDS} seeds × {N_ROUNDS} rounds on real mp_20 hull pool:")
