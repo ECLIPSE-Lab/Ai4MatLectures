@@ -21,3 +21,5 @@ matminer>=0.9
 dscribe>=2.1
 mace-torch>=0.3.6
 ase>=3.23
+# Week 3 homework: wavelet denoising block (hard import, CI needs it).
+pywavelets>=1.5

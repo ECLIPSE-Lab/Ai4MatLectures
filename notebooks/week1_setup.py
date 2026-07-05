@@ -102,7 +102,10 @@ print(f"Subset (Materials 0-1, Features 2-3):\n{features[:2, -2:]}")
 # Let's load a real material micrograph and see how basic slicing and indexing concepts apply to real data.
 
 # %%
-filename = '../data/hrtem/image_000.tiff'
+# Path resolves from the repo root (quarto renders there) or from notebooks/.
+filename = 'data/hrtem/image_000.tiff'
+if not os.path.exists(filename):
+    filename = '../' + filename
 import imageio
 im = imageio.imread(filename)
 print(im.shape)
@@ -630,5 +633,6 @@ plt.show()
 
 # Example assert for students: their_image should be equal to the ground truth binary file
 # Uncomment and use this line after students generate their own image array named `their_image`
-gt = np.load("smiley_gt.npy")
+_gt_path = "smiley_gt.npy" if os.path.exists("smiley_gt.npy") else "notebooks/smiley_gt.npy"
+gt = np.load(_gt_path)
 assert np.allclose(image, gt), "Your output does not match the expected smiley image."

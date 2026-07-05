@@ -124,7 +124,12 @@ print(f'Relative Frobenius error: {frob_err:.3%}')
 
 # %%
 # Load the HRTEM image from week 1, clean it lightly, and cut a patch.
-im = imageio.imread('../data/hrtem/image_000.tiff').astype(np.float32)
+# Path resolves from the repo root (quarto renders there) or from notebooks/.
+import os
+_im_path = 'data/hrtem/image_000.tiff'
+if not os.path.exists(_im_path):
+    _im_path = '../' + _im_path
+im = imageio.imread(_im_path).astype(np.float32)
 # Clip extreme outliers (the X-ray spikes from week 1) by simple percentile clipping here.
 lo, hi = np.percentile(im, [2, 99.5])
 im = np.clip(im, lo, hi)
@@ -566,7 +571,10 @@ print(f'Poisson (physics-aware)       : {mu_pois_shifted:.3f}    (knows rate >= 
 # Mystery dataset for you. Run this cell as-is.
 # The true frequency is stored inside the .npz file but you must not read it
 # out until task 5 -- stick to `ts_mystery` and `ys_mystery`.
-_mystery = np.load('../data/week2_mystery.npz')
+_mystery_path = 'data/week2_mystery.npz'
+if not os.path.exists(_mystery_path):
+    _mystery_path = '../' + _mystery_path
+_mystery = np.load(_mystery_path)
 ts_mystery = _mystery['ts']
 ys_mystery = _mystery['ys']
 fs_mystery = float(_mystery['fs'])
