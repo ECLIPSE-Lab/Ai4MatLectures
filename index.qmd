@@ -53,6 +53,7 @@ scripts (Jupytext cell markers).
 | 8 | Generalization, robustness & process windows (exercise cancelled — Fronleichnam) | Tensile Test | **braided self-study:** [week7_generalization_and_ensembles.py](notebooks/week7_generalization_and_ensembles.py) (Blocks 2–5) and [week8_uncertainty_and_robustness.py](notebooks/week8_uncertainty_and_robustness.py) (Blocks 6–7, sensitivity + process windows) |
 | 11 | Anomaly detection via AE (automation context) | Cahn-Hilliard | [week11_anomaly_cahn_hilliard](notebooks/MLPC/week11_anomaly_cahn_hilliard.html) |
 | 12 | UQ + Bayesian active learning | Tensile Test | **braided:** [week12_uncertainty_and_discovery.py](notebooks/week12_uncertainty_and_discovery.py) (Blocks 2–4) |
+| 13 | MC-Dropout segmentation UQ (self-study — lecture cancelled 07.07) | MetalDAM | [week13_mcdropout_metaldam](notebooks/MLPC/week13_mcdropout_metaldam.html) |
 
 ## MG — Materials Genomics
 
