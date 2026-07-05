@@ -972,8 +972,8 @@ for step in range(budget - n_seed):
     # --- Model: closed-form ridge surrogate on measured crystals ---
     A = torch.cat([Zm, torch.ones(len(measured), 1)], dim=1)
     d = A.shape[1]
-    reg = 1.0 * torch.eye(d); reg[-1, -1] = 0.0
-    w = torch.linalg.solve(A.T @ A + reg, A.T @ ym.unsqueeze(1))
+    ridge_mat = 1.0 * torch.eye(d); ridge_mat[-1, -1] = 0.0  # don't shadow the CNN regressor `reg` (used again in Block 6)
+    w = torch.linalg.solve(A.T @ A + ridge_mat, A.T @ ym.unsqueeze(1))
     resid = (A @ w).squeeze(1) - ym
     sigma = resid.std(unbiased=False).clamp_min(1e-3)        # surrogate noise
 
